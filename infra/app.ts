@@ -49,7 +49,8 @@ class BtcUpDownStack extends Stack {
       targets: [new LambdaFunction(poller)],
     });
 
-    const apiHandler = lambda('ApiHandler', 'api.ts');
+    // CPU scales with memory. At 128 MB, a cold GET /price/history took up to 2.6 s, against a 2 s Coinbase timeout.
+    const apiHandler = lambda('ApiHandler', 'api.ts', { memorySize: 256 });
     table.grantReadWriteData(apiHandler);
     // GET /state starts the poller when the price shows it has stopped (D10).
     apiHandler.addEnvironment('POLLER_FUNCTION_NAME', poller.functionName);
@@ -67,6 +68,7 @@ class BtcUpDownStack extends Stack {
     api.addRoutes({ path: '/state', methods: [HttpMethod.GET], integration });
     api.addRoutes({ path: '/player', methods: [HttpMethod.POST], integration });
     api.addRoutes({ path: '/guess', methods: [HttpMethod.POST], integration });
+    api.addRoutes({ path: '/price/history', methods: [HttpMethod.GET], integration });
 
     const siteBucket = new Bucket(this, 'SiteBucket');
     const site = new Distribution(this, 'Site', {

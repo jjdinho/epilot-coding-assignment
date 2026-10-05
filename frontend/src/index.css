@@ -14,6 +14,23 @@ main {
   font-variant-numeric: tabular-nums;
 }
 
+.chart {
+  display: block;
+  width: 100%;
+  height: 8rem;
+  margin: 1rem 0;
+  /* A line at the highest or lowest price isn't clipped. */
+  overflow: visible;
+}
+
+.chart polyline {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2px;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+
 .guess {
   display: flex;
   gap: 0.5rem;
