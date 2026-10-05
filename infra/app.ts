@@ -1,0 +1,83 @@
+import * as path from 'node:path';
+import { App, CfnOutput, Duration, Stack, type StackProps } from 'aws-cdk-lib';
+import { CorsHttpMethod, HttpApi, HttpMethod } from 'aws-cdk-lib/aws-apigatewayv2';
+import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
+import { Distribution, ViewerProtocolPolicy } from 'aws-cdk-lib/aws-cloudfront';
+import { S3BucketOrigin } from 'aws-cdk-lib/aws-cloudfront-origins';
+import { AttributeType, TableV2 } from 'aws-cdk-lib/aws-dynamodb';
+import { Rule, Schedule } from 'aws-cdk-lib/aws-events';
+import { LambdaFunction } from 'aws-cdk-lib/aws-events-targets';
+import { Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
+import { NodejsFunction, type NodejsFunctionProps } from 'aws-cdk-lib/aws-lambda-nodejs';
+import { Bucket } from 'aws-cdk-lib/aws-s3';
+import { BucketDeployment, Source } from 'aws-cdk-lib/aws-s3-deployment';
+import type { Construct } from 'constructs';
+
+class BtcUpDownStack extends Stack {
+  constructor(scope: Construct, id: string, props: StackProps) {
+    super(scope, id, props);
+
+    const table = new TableV2(this, 'Table', {
+      partitionKey: { name: 'pk', type: AttributeType.STRING },
+    });
+
+    const lambda = (id: string, file: string, props: NodejsFunctionProps = {}) =>
+      new NodejsFunction(this, id, {
+        entry: path.join(__dirname, '../backend/src', file),
+        runtime: Runtime.NODEJS_22_X,
+        architecture: Architecture.ARM_64,
+        environment: { TABLE_NAME: table.tableName },
+        ...props,
+      });
+
+    // Invoked every minute; each run loops for ~70 s at one tick per second (D2).
+    const poller = lambda('Poller', 'poller.ts', { memorySize: 128, timeout: Duration.seconds(90) });
+    table.grantWriteData(poller);
+    new Rule(this, 'PollerSchedule', {
+      schedule: Schedule.rate(Duration.minutes(1)),
+      targets: [new LambdaFunction(poller)],
+    });
+
+    const apiHandler = lambda('ApiHandler', 'api.ts');
+    table.grantReadWriteData(apiHandler);
+    const api = new HttpApi(this, 'Api', {
+      corsPreflight: {
+        allowOrigins: ['*'],
+        allowMethods: [CorsHttpMethod.GET, CorsHttpMethod.POST],
+        allowHeaders: ['content-type', 'x-player-id'],
+        // The client polls every second, so let browsers cache the preflight.
+        maxAge: Duration.hours(2),
+      },
+    });
+    const integration = new HttpLambdaIntegration('ApiIntegration', apiHandler);
+    api.addRoutes({ path: '/state', methods: [HttpMethod.GET], integration });
+    api.addRoutes({ path: '/player', methods: [HttpMethod.POST], integration });
+
+    const siteBucket = new Bucket(this, 'SiteBucket');
+    const site = new Distribution(this, 'Site', {
+      defaultBehavior: {
+        origin: S3BucketOrigin.withOriginAccessControl(siteBucket),
+        viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+      },
+      defaultRootObject: 'index.html',
+    });
+    // config.json is written at deploy time, so the frontend build doesn't depend on the API URL.
+    new BucketDeployment(this, 'SiteDeployment', {
+      sources: [
+        Source.asset(path.join(__dirname, '../frontend/dist')),
+        Source.jsonData('config.json', { apiUrl: api.apiEndpoint }),
+      ],
+      destinationBucket: siteBucket,
+      distribution: site,
+    });
+
+    new CfnOutput(this, 'SiteUrl', { value: `https://${site.distributionDomainName}` });
+    new CfnOutput(this, 'ApiUrl', { value: api.apiEndpoint });
+  }
+}
+
+const app = new App();
+// No context lookups, so `cdk synth` runs without AWS credentials.
+new BtcUpDownStack(app, 'BtcUpDown', {
+  env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: 'eu-north-1' },
+});
