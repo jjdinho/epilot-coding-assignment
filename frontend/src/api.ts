@@ -1,6 +1,7 @@
+import type { Direction } from '../../backend/src/domain/guess';
 import type { State } from '../../backend/src/domain/state';
 
-export type { State };
+export type { Direction, State };
 
 // Written into the site bucket at deploy time.
 const config: Promise<{ apiUrl: string }> = fetch('/config.json').then((res) => res.json());

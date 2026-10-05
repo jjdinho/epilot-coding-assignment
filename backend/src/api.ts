@@ -1,8 +1,10 @@
-import { TransactionCanceledException } from '@aws-sdk/client-dynamodb';
-import { GetCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
+import { ConditionalCheckFailedException, TransactionCanceledException } from '@aws-sdk/client-dynamodb';
+import { GetCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEventV2, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
 import { db, PRICE_KEY, TABLE_NAME } from './db';
+import { isValidDirection } from './domain/guess';
 import { aliasKey, isValidAlias, isValidPlayerId } from './domain/player';
+import { isStale } from './domain/price';
 import { buildState, type Player, type Tick } from './domain/state';
 
 type Result = APIGatewayProxyStructuredResultV2;
@@ -17,6 +19,8 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<Result> {
       return getState(playerId);
     case 'POST /player':
       return createPlayer(playerId, parseBody(event.body)?.alias);
+    case 'POST /guess':
+      return createGuess(playerId, parseBody(event.body)?.direction);
     default:
       throw new Error(`No handler for route ${event.routeKey}`);
   }
@@ -55,6 +59,48 @@ async function createPlayer(playerId: string, alias: unknown): Promise<Result> {
     throw err;
   }
   return json(201, buildState(player, await getItem<Tick>(PRICE_KEY), new Date()));
+}
+
+async function createGuess(playerId: string, direction: unknown): Promise<Result> {
+  if (!isValidDirection(direction)) return error(400, 'INVALID_DIRECTION');
+
+  const now = new Date();
+  const tick = await getItem<Tick>(PRICE_KEY);
+  // Guessing against an old price would give hindsight (D8).
+  if (!tick || isStale(tick.observedAt, now)) return error(503, 'PRICE_STALE');
+
+  try {
+    const { Attributes } = await db.send(
+      new UpdateCommand({
+        TableName: TABLE_NAME,
+        Key: { pk: playerId },
+        UpdateExpression:
+          'SET #guessDirection = :direction, #guessEntryPrice = :entryPrice, #guessedAt = :guessedAt, #guessStatus = :open',
+        // One open guess at a time, and only for an existing player.
+        ConditionExpression: 'attribute_exists(#pk) AND attribute_not_exists(#guessStatus)',
+        ExpressionAttributeNames: {
+          '#pk': 'pk',
+          '#guessDirection': 'guessDirection',
+          '#guessEntryPrice': 'guessEntryPrice',
+          '#guessedAt': 'guessedAt',
+          '#guessStatus': 'guessStatus',
+        },
+        ExpressionAttributeValues: {
+          ':direction': direction,
+          ':entryPrice': tick.price,
+          ':guessedAt': now.toISOString(),
+          ':open': 'OPEN',
+        },
+        ReturnValues: 'ALL_NEW',
+        ReturnValuesOnConditionCheckFailure: 'ALL_OLD',
+      }),
+    );
+    return json(201, buildState(Attributes as Player, tick, now));
+  } catch (err) {
+    if (!(err instanceof ConditionalCheckFailedException)) throw err;
+    // The old item comes back only if the player exists, so its guess is what failed the check.
+    return err.Item ? error(409, 'GUESS_OPEN') : error(404, 'PLAYER_NOT_FOUND');
+  }
 }
 
 // Consistent, so a poll right after POST /player finds the new player.

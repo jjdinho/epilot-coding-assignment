@@ -48,4 +48,4 @@ Runs against the deployed API. The poller starts within a minute of the first de
 API_URL=<ApiUrl> npm run smoke
 ```
 
-Each run reserves an alias of the form `smoke_xxxxxxxx` for good.
+It takes over a minute, because it waits for the poller to resolve a guess. Each run reserves an alias of the form `smoke_xxxxxxxx` for good.
