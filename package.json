@@ -1,0 +1,23 @@
+{
+  "name": "btc-up-down",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "backend",
+    "frontend",
+    "infra"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "build": "tsc && npm run build -w frontend",
+    "synth": "npm run synth -w infra",
+    "deploy": "npm run build && npm run deploy -w infra",
+    "smoke": "tsx smoke/smoke.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
+  }
+}
