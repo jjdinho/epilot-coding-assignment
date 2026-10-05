@@ -4,7 +4,7 @@ import { CorsHttpMethod, HttpApi, HttpMethod } from 'aws-cdk-lib/aws-apigatewayv
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import { Distribution, ViewerProtocolPolicy } from 'aws-cdk-lib/aws-cloudfront';
 import { S3BucketOrigin } from 'aws-cdk-lib/aws-cloudfront-origins';
-import { AttributeType, TableV2 } from 'aws-cdk-lib/aws-dynamodb';
+import { AttributeType, ProjectionType, TableV2 } from 'aws-cdk-lib/aws-dynamodb';
 import { Rule, Schedule } from 'aws-cdk-lib/aws-events';
 import { LambdaFunction } from 'aws-cdk-lib/aws-events-targets';
 import { Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
@@ -19,6 +19,16 @@ class BtcUpDownStack extends Stack {
 
     const table = new TableV2(this, 'Table', {
       partitionKey: { name: 'pk', type: AttributeType.STRING },
+      // Sparse: only players with an open guess have guessStatus. The poller finds due guesses here (§5).
+      globalSecondaryIndexes: [
+        {
+          indexName: 'open-guesses',
+          partitionKey: { name: 'guessStatus', type: AttributeType.STRING },
+          sortKey: { name: 'guessedAt', type: AttributeType.STRING },
+          projectionType: ProjectionType.INCLUDE,
+          nonKeyAttributes: ['guessDirection', 'guessEntryPrice'],
+        },
+      ],
     });
 
     const lambda = (id: string, file: string, props: NodejsFunctionProps = {}) =>
@@ -31,8 +41,9 @@ class BtcUpDownStack extends Stack {
       });
 
     // Invoked every minute; each run loops for ~70 s at one tick per second (D2).
-    const poller = lambda('Poller', 'poller.ts', { memorySize: 128, timeout: Duration.seconds(90) });
-    table.grantWriteData(poller);
+    // 192 MB leaves headroom: at 128 MB it peaked at 113 MB before it resolved guesses.
+    const poller = lambda('Poller', 'poller.ts', { memorySize: 192, timeout: Duration.seconds(90) });
+    table.grantReadWriteData(poller);
     new Rule(this, 'PollerSchedule', {
       schedule: Schedule.rate(Duration.minutes(1)),
       targets: [new LambdaFunction(poller)],
@@ -52,6 +63,7 @@ class BtcUpDownStack extends Stack {
     const integration = new HttpLambdaIntegration('ApiIntegration', apiHandler);
     api.addRoutes({ path: '/state', methods: [HttpMethod.GET], integration });
     api.addRoutes({ path: '/player', methods: [HttpMethod.POST], integration });
+    api.addRoutes({ path: '/guess', methods: [HttpMethod.POST], integration });
 
     const siteBucket = new Bucket(this, 'SiteBucket');
     const site = new Distribution(this, 'Site', {

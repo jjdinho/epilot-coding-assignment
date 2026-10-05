@@ -19,4 +19,26 @@ describe('buildState', () => {
   it('has no price before the first tick', () => {
     expect(buildState(player, undefined, now).price).toBeNull();
   });
+
+  it('shows the open guess and the last result', () => {
+    const lastResult = {
+      direction: 'DOWN' as const,
+      entryPrice: '86030.00',
+      resolvedPrice: '86020.00',
+      guessedAt: '2026-10-02T14:45:00.000Z',
+      resolvedAt: '2026-10-02T14:46:01.000Z',
+      delta: 1 as const,
+    };
+    const guessing = {
+      ...player,
+      guessDirection: 'UP' as const,
+      guessEntryPrice: '86010.00',
+      guessedAt: '2026-10-02T14:47:50.000Z',
+      lastResult,
+    };
+    expect(buildState(guessing, undefined, now)).toMatchObject({
+      openGuess: { direction: 'UP', entryPrice: '86010.00', guessedAt: '2026-10-02T14:47:50.000Z' },
+      lastResult,
+    });
+  });
 });

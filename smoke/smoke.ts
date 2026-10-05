@@ -1,6 +1,7 @@
 // Smoke test against the deployed API: API_URL=<ApiUrl output> npm run smoke
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 const apiUrl = process.env.API_URL;
 if (!apiUrl) throw new Error('Set API_URL to the stack output ApiUrl');
@@ -55,4 +56,50 @@ await check('GET /state → the alias, score 0, a fresh price', async () => {
   assert.equal(body.alias, alias);
   assert.equal(body.score, 0);
   assert.equal(body.price?.stale, false);
+});
+
+await check('Guess from an unknown player ID → 404 PLAYER_NOT_FOUND', async () => {
+  assert.deepEqual(await call('POST', '/guess', randomUUID(), { direction: 'UP' }), {
+    status: 404,
+    body: { error: 'PLAYER_NOT_FOUND' },
+  });
+});
+
+await check('Bad direction → 400 INVALID_DIRECTION', async () => {
+  assert.deepEqual(await call('POST', '/guess', playerId, { direction: 'SIDEWAYS' }), {
+    status: 400,
+    body: { error: 'INVALID_DIRECTION' },
+  });
+});
+
+await check('Guess → 201 with an open guess', async () => {
+  const { status, body } = await call('POST', '/guess', playerId, { direction: 'UP' });
+  assert.equal(status, 201);
+  assert.equal(body.openGuess?.direction, 'UP');
+});
+
+await check('Second guess → 409 GUESS_OPEN', async () => {
+  assert.deepEqual(await call('POST', '/guess', playerId, { direction: 'DOWN' }), {
+    status: 409,
+    body: { error: 'GUESS_OPEN' },
+  });
+});
+
+console.log('  Waiting for the poller to resolve the guess, which takes over a minute…');
+await check('The guess resolves, and the score moves by lastResult.delta', async () => {
+  const giveUpAt = Date.now() + 3 * 60_000;
+  let state;
+  do {
+    await sleep(2_000);
+    state = (await call('GET', '/state', playerId)).body;
+  } while (state.openGuess && Date.now() < giveUpAt);
+  assert.equal(state.openGuess, null, 'Still open after 3 minutes');
+
+  const { delta, guessedAt, resolvedAt, entryPrice, resolvedPrice } = state.lastResult;
+  assert.ok(delta === 1 || delta === -1);
+  // The player started at 0.
+  assert.equal(state.score, delta);
+  // Resolved at a tick at least 60 s after the guess, at a different price (D4).
+  assert.ok(Date.parse(resolvedAt) - Date.parse(guessedAt) >= 60_000);
+  assert.notEqual(Number(resolvedPrice), Number(entryPrice));
 });

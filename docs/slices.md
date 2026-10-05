@@ -77,7 +77,7 @@ Root scripts:
 
 - **API URL in the frontend.** The stack writes `config.json` (`{ "apiUrl": "…" }`) into the site bucket with `BucketDeployment` and `Source.jsonData`, which resolves the URL at deploy time. The frontend fetches it on startup. The frontend build then doesn't depend on the deploy, and one `cdk deploy` is enough.
 - **CORS.** The HTTP API allows any origin, `GET` and `POST`, and the `Content-Type` and `X-Player-Id` headers. No cookies are involved (D6), so a wildcard origin is fine.
-- **Lambdas.** `NodejsFunction`, Node 22, ARM64. Poller at 128 MB (D10). Add `esbuild` as a dev dependency so bundling doesn't need Docker. Use the built-in `fetch` with a timeout (`AbortSignal.timeout`) for Coinbase calls.
+- **Lambdas.** `NodejsFunction`, Node 22, ARM64. Poller at 192 MB (D10): at 128 MB it peaked at 113 MB, before slice 2 added the resolve step. Add `esbuild` as a dev dependency so bundling doesn't need Docker. Use the built-in `fetch` with a timeout (`AbortSignal.timeout`) for Coinbase calls.
 - **Stack environment.** Region `eu-north-1`, account from `CDK_DEFAULT_ACCOUNT`, no context lookups, so `cdk synth` runs without AWS credentials. Stack outputs: `SiteUrl` and `ApiUrl`.
 
 ## Slice 1 — Join and watch the price
@@ -119,7 +119,7 @@ Root scripts:
 - [ ] Open `SiteUrl` in a fresh browser. Pick an alias, see score 0 and the price moving about once a second.
 - [ ] Reload: same alias and score, no alias form.
 
-Until slice 3 is deployed, the poller runs every minute around the clock, about $7 a month pro rata (D10).
+Until slice 3 is deployed, the poller runs every minute around the clock, about $10 a month pro rata (D10).
 
 ## Slice 2 — Guess and get scored
 
