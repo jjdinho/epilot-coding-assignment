@@ -20,6 +20,10 @@ describe('buildState', () => {
     expect(buildState(player, undefined, now).price).toBeNull();
   });
 
+  it('has no price when a visit created the price item before the first tick', () => {
+    expect(buildState(player, { lastVisitAt: '2026-10-02T14:48:39.000Z' }, now).price).toBeNull();
+  });
+
   it('shows the open guess and the last result', () => {
     const lastResult = {
       direction: 'DOWN' as const,
