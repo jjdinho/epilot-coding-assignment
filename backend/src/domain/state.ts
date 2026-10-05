@@ -11,9 +11,12 @@ export interface Player {
   lastResult?: LastResult;
 }
 
-export interface Tick {
-  price: string;
-  observedAt: string;
+// The PRICE#LATEST item (§5). A visit creates it if it's missing, so it can exist before the first tick (D10).
+export interface PriceItem {
+  price?: string;
+  observedAt?: string;
+  lastVisitAt?: string;
+  startRequestedAt?: string;
 }
 
 export interface State {
@@ -25,10 +28,11 @@ export interface State {
 }
 
 // The response of GET /state, POST /player and POST /guess (§6).
-export function buildState(player: Player, tick: Tick | undefined, now: Date): State {
+export function buildState(player: Player, priceItem: PriceItem | undefined, now: Date): State {
   const { guessDirection: direction, guessEntryPrice: entryPrice, guessedAt } = player;
+  const { price: value, observedAt } = priceItem ?? {};
   return {
-    price: tick ? { value: tick.price, observedAt: tick.observedAt, stale: isStale(tick.observedAt, now) } : null,
+    price: value && observedAt ? { value, observedAt, stale: isStale(observedAt, now) } : null,
     alias: player.alias,
     score: player.score,
     openGuess: direction && entryPrice && guessedAt ? { direction, entryPrice, guessedAt } : null,

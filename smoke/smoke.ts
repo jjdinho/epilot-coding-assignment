@@ -50,8 +50,14 @@ await check('Same ID again → 409 PLAYER_EXISTS', async () => {
   assert.deepEqual(await call('POST', '/player', playerId, { alias }), { status: 409, body: { error: 'PLAYER_EXISTS' } });
 });
 
-await check('GET /state → the alias, score 0, a fresh price', async () => {
-  const { status, body } = await call('GET', '/state', playerId);
+await check('GET /state → the alias, score 0, a fresh price within 10 s', async () => {
+  // If the app was idle, this visit starts the poller, and its first tick takes a second or two (D10).
+  const giveUpAt = Date.now() + 10_000;
+  let { status, body } = await call('GET', '/state', playerId);
+  while (body.price?.stale !== false && Date.now() < giveUpAt) {
+    await sleep(500);
+    ({ status, body } = await call('GET', '/state', playerId));
+  }
   assert.equal(status, 200);
   assert.equal(body.alias, alias);
   assert.equal(body.score, 0);

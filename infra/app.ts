@@ -40,7 +40,7 @@ class BtcUpDownStack extends Stack {
         ...props,
       });
 
-    // Invoked every minute; each run loops for ~70 s at one tick per second (D2).
+    // Invoked every minute; each run loops for ~70 s at one tick per second (D2), or exits if the app is idle (D10).
     // 192 MB leaves headroom: at 128 MB it peaked at 113 MB before it resolved guesses.
     const poller = lambda('Poller', 'poller.ts', { memorySize: 192, timeout: Duration.seconds(90) });
     table.grantReadWriteData(poller);
@@ -51,6 +51,9 @@ class BtcUpDownStack extends Stack {
 
     const apiHandler = lambda('ApiHandler', 'api.ts');
     table.grantReadWriteData(apiHandler);
+    // GET /state starts the poller when the price shows it has stopped (D10).
+    apiHandler.addEnvironment('POLLER_FUNCTION_NAME', poller.functionName);
+    poller.grantInvoke(apiHandler);
     const api = new HttpApi(this, 'Api', {
       corsPreflight: {
         allowOrigins: ['*'],

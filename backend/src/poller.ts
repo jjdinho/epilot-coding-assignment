@@ -1,11 +1,11 @@
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
-import { QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { db, PRICE_KEY, TABLE_NAME } from './db';
+import { RUN_MS, shouldPoll } from './domain/activity';
 import { dueCutoff, scoreGuess, type Direction, type LastResult } from './domain/guess';
+import type { PriceItem } from './domain/state';
 
 const TICKER_URL = 'https://api.exchange.coinbase.com/products/BTC-USD/ticker';
-// Runs overlap the next minute's run by ~10 s, so a late schedule leaves no gap (D2).
-const RUN_MS = 70_000;
 const TICK_MS = 1_000;
 
 interface OpenGuess {
@@ -16,6 +16,10 @@ interface OpenGuess {
 }
 
 export async function handler(): Promise<void> {
+  if (!(await inUse())) {
+    console.log('Idle, not polling');
+    return;
+  }
   console.log('Polling started');
   const runEnd = Date.now() + RUN_MS;
   while (Date.now() < runEnd) {
@@ -28,6 +32,25 @@ export async function handler(): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, tickStart + TICK_MS - Date.now()));
   }
   console.log('Polling stopped');
+}
+
+// A visit in the last 30 s or any open guess keeps the poller running (D10).
+async function inUse(): Promise<boolean> {
+  const [{ Item }, { Items = [] }] = await Promise.all([
+    // Consistent, so a run the API has just started sees the visit it wrote first.
+    db.send(new GetCommand({ TableName: TABLE_NAME, Key: { pk: PRICE_KEY }, ConsistentRead: true })),
+    db.send(
+      new QueryCommand({
+        TableName: TABLE_NAME,
+        IndexName: 'open-guesses',
+        KeyConditionExpression: '#guessStatus = :open',
+        ExpressionAttributeNames: { '#guessStatus': 'guessStatus' },
+        ExpressionAttributeValues: { ':open': 'OPEN' },
+        Limit: 1,
+      }),
+    ),
+  ]);
+  return shouldPoll(Item as PriceItem | undefined, Items.length > 0, new Date());
 }
 
 async function tick(): Promise<void> {

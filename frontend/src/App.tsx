@@ -27,11 +27,20 @@ export function App() {
       if (res.status === 404) setNeedsAlias(true);
       else if (body) setState(body);
     }
-    poll();
-    const timer = setInterval(poll, 1_000);
+    // A hidden tab doesn't poll, so a forgotten one doesn't keep the poller running (D10).
+    let timer: ReturnType<typeof setInterval> | undefined;
+    function pollWhileVisible() {
+      clearInterval(timer);
+      if (document.visibilityState !== 'visible') return;
+      poll();
+      timer = setInterval(poll, 1_000);
+    }
+    pollWhileVisible();
+    document.addEventListener('visibilitychange', pollWhileVisible);
     return () => {
       stopped = true;
       clearInterval(timer);
+      document.removeEventListener('visibilitychange', pollWhileVisible);
     };
   }, [needsAlias]);
 

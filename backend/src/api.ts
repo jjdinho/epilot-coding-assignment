@@ -1,13 +1,17 @@
 import { ConditionalCheckFailedException, TransactionCanceledException } from '@aws-sdk/client-dynamodb';
+import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import { GetCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEventV2, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
 import { db, PRICE_KEY, TABLE_NAME } from './db';
+import { shouldRecordVisit, shouldStartPoller, startCutoff, visitCutoff } from './domain/activity';
 import { isValidDirection } from './domain/guess';
 import { aliasKey, isValidAlias, isValidPlayerId } from './domain/player';
 import { isStale } from './domain/price';
-import { buildState, type Player, type Tick } from './domain/state';
+import { buildState, type Player, type PriceItem } from './domain/state';
 
 type Result = APIGatewayProxyStructuredResultV2;
+
+const lambda = new LambdaClient({});
 
 export async function handler(event: APIGatewayProxyEventV2): Promise<Result> {
   // Checked before any DynamoDB access, so a client can't address the price or alias items (D6).
@@ -27,9 +31,41 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<Result> {
 }
 
 async function getState(playerId: string): Promise<Result> {
-  const [player, tick] = await Promise.all([getItem<Player>(playerId), getItem<Tick>(PRICE_KEY)]);
+  const [player, priceItem] = await Promise.all([getItem<Player>(playerId), getItem<PriceItem>(PRICE_KEY)]);
   if (!player) return error(404, 'PLAYER_NOT_FOUND');
-  return json(200, buildState(player, tick, new Date()));
+  const now = new Date();
+  await keepPollerRunning(priceItem, now);
+  return json(200, buildState(player, priceItem, now));
+}
+
+// Each poll is a visit, which keeps the poller running. A price that has gone stale means it stopped (D10).
+async function keepPollerRunning(priceItem: PriceItem | undefined, now: Date): Promise<void> {
+  // Written before the start: a new run exits straight away unless it finds a recent visit.
+  if (shouldRecordVisit(priceItem, now)) await setTimeIfBefore('lastVisitAt', visitCutoff(now), now);
+  if (shouldStartPoller(priceItem, now) && (await setTimeIfBefore('startRequestedAt', startCutoff(now), now))) {
+    // Asynchronous, so the response doesn't wait for the run.
+    await lambda.send(new InvokeCommand({ FunctionName: process.env.POLLER_FUNCTION_NAME, InvocationType: 'Event' }));
+  }
+}
+
+// Sets a time on the price item to now if it's missing or before the cutoff. False if another request set it first.
+async function setTimeIfBefore(name: 'lastVisitAt' | 'startRequestedAt', cutoff: string, now: Date): Promise<boolean> {
+  try {
+    await db.send(
+      new UpdateCommand({
+        TableName: TABLE_NAME,
+        Key: { pk: PRICE_KEY },
+        UpdateExpression: 'SET #time = :now',
+        ConditionExpression: 'attribute_not_exists(#time) OR #time < :cutoff',
+        ExpressionAttributeNames: { '#time': name },
+        ExpressionAttributeValues: { ':now': now.toISOString(), ':cutoff': cutoff },
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (err instanceof ConditionalCheckFailedException) return false;
+    throw err;
+  }
 }
 
 async function createPlayer(playerId: string, alias: unknown): Promise<Result> {
@@ -58,16 +94,16 @@ async function createPlayer(playerId: string, alias: unknown): Promise<Result> {
     if (aliasReason?.Code === 'ConditionalCheckFailed') return error(409, 'ALIAS_TAKEN');
     throw err;
   }
-  return json(201, buildState(player, await getItem<Tick>(PRICE_KEY), new Date()));
+  return json(201, buildState(player, await getItem<PriceItem>(PRICE_KEY), new Date()));
 }
 
 async function createGuess(playerId: string, direction: unknown): Promise<Result> {
   if (!isValidDirection(direction)) return error(400, 'INVALID_DIRECTION');
 
   const now = new Date();
-  const tick = await getItem<Tick>(PRICE_KEY);
-  // Guessing against an old price would give hindsight (D8).
-  if (!tick || isStale(tick.observedAt, now)) return error(503, 'PRICE_STALE');
+  const priceItem = await getItem<PriceItem>(PRICE_KEY);
+  // Guessing against an old price would give hindsight (D8). The poller sets price and observedAt together.
+  if (!priceItem?.observedAt || isStale(priceItem.observedAt, now)) return error(503, 'PRICE_STALE');
 
   try {
     const { Attributes } = await db.send(
@@ -87,7 +123,7 @@ async function createGuess(playerId: string, direction: unknown): Promise<Result
         },
         ExpressionAttributeValues: {
           ':direction': direction,
-          ':entryPrice': tick.price,
+          ':entryPrice': priceItem.price,
           ':guessedAt': now.toISOString(),
           ':open': 'OPEN',
         },
@@ -95,7 +131,7 @@ async function createGuess(playerId: string, direction: unknown): Promise<Result
         ReturnValuesOnConditionCheckFailure: 'ALL_OLD',
       }),
     );
-    return json(201, buildState(Attributes as Player, tick, now));
+    return json(201, buildState(Attributes as Player, priceItem, now));
   } catch (err) {
     if (!(err instanceof ConditionalCheckFailedException)) throw err;
     // The old item comes back only if the player exists, so its guess is what failed the check.

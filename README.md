@@ -42,7 +42,7 @@ The stack outputs `SiteUrl` (the game) and `ApiUrl`.
 
 ## Smoke test
 
-Runs against the deployed API. The poller starts within a minute of the first deploy, so wait for it before running this.
+Runs against the deployed API. The poller only runs while the app is in use, so the test's first visit starts it if needed.
 
 ```sh
 API_URL=<ApiUrl> npm run smoke
