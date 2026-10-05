@@ -132,7 +132,7 @@ Runs only happen while the app is in use, and the API can start one early (D10).
 
 **Decision.** The poller runs while someone has visited in the last 30 seconds or any guess is open. Otherwise nothing polls Coinbase or writes to DynamoDB.
 
-**Why.** Nothing should run when nobody is using the app. Polling around the clock costs about $2.50 a month in DynamoDB writes and queries, plus about $5 in Lambda time (128 MB on ARM) once the free allowance is used up, whether or not anyone plays. On demand, an idle month costs about 2 cents for the per-minute checks. An hour of play costs about 1 cent, plus under a cent per open tab. (Frankfurt on-demand prices, October 2026.) The saving is a few dollars a month, but it's how we'd want a real service to behave, and the extra pieces are small.
+**Why.** Nothing should run when nobody is using the app. Polling around the clock costs about $2.20 a month in DynamoDB writes and queries, plus about $5 in Lambda time (128 MB on ARM) once the free allowance is used up, whether or not anyone plays. On demand, an idle month costs about 2 cents for the per-minute checks. An hour of play costs about 1 cent, plus under a cent per open tab. (Stockholm on-demand prices, October 2026.) The saving is a few dollars a month, but it's how we'd want a real service to behave, and the extra pieces are small.
 
 **Why open guesses count.** If visitors alone kept the poller running, a player losing at second 50 could close the tab. The poller would stop, and the guess would wait until someone next visits and resolve at whatever the price is then. A near-certain loss becomes a coin flip. Keeping the poller running while any guess is open means every guess resolves at its first qualifying tick (D4), whether or not anyone is watching.
 
@@ -288,7 +288,7 @@ The last 60 seconds, oldest first, one point per second: the last Coinbase trade
 1. **Language and infrastructure-as-code.** Recommendation: TypeScript end to end, AWS CDK. One language for Lambda, frontend, infra, and tests. Alternatives: SAM, SST, Terraform.
 2. **Frontend.** Recommendation: Vite + React, kept to a handful of components. Vanilla is viable given the UI is one screen.
 3. **Frontend hosting.** S3 + CloudFront, or Amplify Hosting. Either is fine; CloudFront can also front the API under one origin if we later want cookies.
-4. **Region.** Recommendation: `eu-central-1` (Frankfurt). epilot is in Cologne and Coinbase works from the EU.
+4. **Region.** Recommendation: `eu-north-1` (Stockholm). Coinbase works from the EU.
 5. **Testing scope.** Recommendation: unit tests for the pure domain logic (resolution rule, staleness, state transitions) and one end-to-end smoke test against the deployed API. No DynamoDB Local.
 6. **Tick cadence.** One per second is the plan. Two per second is within limits if the UI feels sluggish; one per two seconds if we want more headroom. Trivial to change, but the client's poll rate and the chart's per-second history points should change with it (D11).
 
