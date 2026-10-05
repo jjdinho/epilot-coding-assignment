@@ -5,11 +5,14 @@ import type { APIGatewayProxyEventV2, APIGatewayProxyStructuredResultV2 } from '
 import { db, PRICE_KEY, TABLE_NAME } from './db';
 import { shouldRecordVisit, shouldStartPoller, startCutoff, visitCutoff } from './domain/activity';
 import { isValidDirection } from './domain/guess';
+import { priceHistory, type Trade } from './domain/history';
 import { aliasKey, isValidAlias, isValidPlayerId } from './domain/player';
 import { isStale } from './domain/price';
 import { buildState, type Player, type PriceItem } from './domain/state';
 
 type Result = APIGatewayProxyStructuredResultV2;
+
+const TRADES_URL = 'https://api.exchange.coinbase.com/products/BTC-USD/trades?limit=1000';
 
 const lambda = new LambdaClient({});
 
@@ -25,6 +28,8 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<Result> {
       return createPlayer(playerId, parseBody(event.body)?.alias);
     case 'POST /guess':
       return createGuess(playerId, parseBody(event.body)?.direction);
+    case 'GET /price/history':
+      return getPriceHistory();
     default:
       throw new Error(`No handler for route ${event.routeKey}`);
   }
@@ -136,6 +141,19 @@ async function createGuess(playerId: string, direction: unknown): Promise<Result
     if (!(err instanceof ConditionalCheckFailedException)) throw err;
     // The old item comes back only if the player exists, so its guess is what failed the check.
     return err.Item ? error(409, 'GUESS_OPEN') : error(404, 'PLAYER_NOT_FOUND');
+  }
+}
+
+// Recent trades from Coinbase, for the chart. Needs no player and doesn't touch DynamoDB (D11).
+async function getPriceHistory(): Promise<Result> {
+  try {
+    // Uncompressed: in Lambda's Node 22, a timeout while reading a gzipped body can leave the read pending for good.
+    const res = await fetch(TRADES_URL, { headers: { 'accept-encoding': 'identity' }, signal: AbortSignal.timeout(2_000) });
+    if (!res.ok) throw new Error(`Trades returned ${res.status}`);
+    return json(200, { points: priceHistory((await res.json()) as Trade[], new Date()) });
+  } catch (err) {
+    console.error('Price history failed', err);
+    return error(502, 'HISTORY_UNAVAILABLE');
   }
 }
 

@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { AliasForm } from './AliasForm';
-import { request, type Direction, type State } from './api';
+import { request, type Direction, type PricePoint, type State } from './api';
+import { addPoint } from './chart';
 import { secondsLeft } from './countdown';
+import { PriceChart } from './PriceChart';
 
 const usd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 
@@ -13,6 +15,7 @@ const GUESS_ERRORS: Record<string, string> = {
 export function App() {
   const [state, setState] = useState<State>();
   const [needsAlias, setNeedsAlias] = useState(false);
+  const [points, setPoints] = useState<PricePoint[]>([]);
   // Counts accepted guesses, so a poll sent before one can't overwrite the state it returned.
   const guesses = useRef(0);
 
@@ -25,13 +28,25 @@ export function App() {
       const body = res.ok ? await res.json() : undefined;
       if (stopped || guesses.current !== sentAfter) return;
       if (res.status === 404) setNeedsAlias(true);
-      else if (body) setState(body);
+      else if (body) {
+        setState(body);
+        const { price } = body as State;
+        if (price) setPoints((points) => addPoint(points, { value: price.value, time: price.observedAt }));
+      }
+    }
+    // The chart's last minute, which also fills the gap left while polling was paused (D11). Kept even if
+    // polling has stopped since, because the chart also shows while the alias form is up.
+    async function loadHistory() {
+      const res = await request('/price/history');
+      // On failure the chart keeps what it has, nothing on load, and fills from polls.
+      if (res.ok) setPoints((await res.json()).points);
     }
     // A hidden tab doesn't poll, so a forgotten one doesn't keep the poller running (D10).
     let timer: ReturnType<typeof setInterval> | undefined;
     function pollWhileVisible() {
       clearInterval(timer);
       if (document.visibilityState !== 'visible') return;
+      loadHistory();
       poll();
       timer = setInterval(poll, 1_000);
     }
@@ -53,9 +68,12 @@ export function App() {
     <main>
       <h1>BTC Up/Down</h1>
       {needsAlias ? (
-        <AliasForm onJoined={() => setNeedsAlias(false)} />
+        <>
+          <AliasForm onJoined={() => setNeedsAlias(false)} />
+          <PriceChart points={points} />
+        </>
       ) : state ? (
-        <Game state={state} onGuessed={onGuessed} />
+        <Game state={state} points={points} onGuessed={onGuessed} />
       ) : (
         <p>Loading…</p>
       )}
@@ -63,7 +81,7 @@ export function App() {
   );
 }
 
-function Game({ state, onGuessed }: { state: State; onGuessed: (state: State) => void }) {
+function Game({ state, points, onGuessed }: { state: State; points: PricePoint[]; onGuessed: (state: State) => void }) {
   const { alias, score, price, openGuess, lastResult } = state;
   // Re-rendered by every poll, so the countdown ticks once a second.
   const left = openGuess && secondsLeft(openGuess.guessedAt, Date.now());
@@ -79,6 +97,7 @@ function Game({ state, onGuessed }: { state: State; onGuessed: (state: State) =>
           Price feed unavailable · last updated {Math.round((Date.now() - Date.parse(price.observedAt)) / 1_000)} s ago
         </p>
       )}
+      <PriceChart points={points} />
       <GuessButtons state={state} onGuessed={onGuessed} />
       {openGuess && (
         <p>

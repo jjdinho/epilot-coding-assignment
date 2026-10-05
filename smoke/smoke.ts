@@ -32,6 +32,16 @@ await check('New player ID → GET /state 404', async () => {
   assert.deepEqual(await call('GET', '/state', playerId), { status: 404, body: { error: 'PLAYER_NOT_FOUND' } });
 });
 
+await check('GET /price/history, with no player → points from the last minute, oldest first', async () => {
+  const { status, body } = await call('GET', '/price/history', randomUUID());
+  assert.equal(status, 200);
+  const times: number[] = body.points.map((p: { time: string }) => Date.parse(p.time));
+  assert.ok(times.length > 0, 'No points');
+  assert.ok(times.every((time, i) => i === 0 || time > times[i - 1]), 'Not oldest first, one per second');
+  // Roughly, allowing a few seconds between this machine's clock and AWS's.
+  assert.ok(times[0] >= Date.now() - 65_000 && times.at(-1)! <= Date.now() + 5_000, 'Not within the last minute');
+});
+
 await check('POST /player → 201, score 0', async () => {
   const { status, body } = await call('POST', '/player', playerId, { alias });
   assert.equal(status, 201);
