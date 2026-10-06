@@ -90,3 +90,4 @@ More in [design §10](docs/design.md#10-what-we-didnt-do).
 - **Alias changes and moderation.** Aliases are fixed once chosen and not checked for offensive words. A script could reserve many of them.
 - **A dead-letter queue.** A message that keeps failing for a reason other than Coinbase is delivered again every 30 seconds until SQS deletes it after 4 days. The `GET /state` backup still resolves the guess when the player returns, and the error shows in the resolver's log.
 - **A shared price cache, and a cap on the resolver's concurrency.** Both answer a scale the app isn't at (D2).
+- **A mobile layout.** Phones get the same single column as desktops: it fits, but isn't designed for a small screen. The guess controls would gain most. On mobile, the Up and Down buttons, the price and the score would stick to the bottom of the screen, so they stay in reach while the player scrolls through results.
