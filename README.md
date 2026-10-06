@@ -6,7 +6,7 @@ The design and its trade-offs are in [docs/design.md](docs/design.md). The build
 
 ## Layout
 
-- `backend/`: the API and poller Lambdas. Pure game rules live in `backend/src/domain`, with their tests.
+- `backend/`: the API and resolver Lambdas. Pure game rules live in `backend/src/domain`, with their tests.
 - `frontend/`: Vite + React single page.
 - `infra/`: the CDK app, one stack in `eu-north-1`.
 - `smoke/`: smoke test against the deployed API.
@@ -42,10 +42,10 @@ The stack outputs `SiteUrl` (the game) and `ApiUrl`.
 
 ## Smoke test
 
-Runs against the deployed API. The poller only runs while the app is in use, so the test's first visit starts it if needed.
+Runs against the deployed API.
 
 ```sh
 API_URL=<ApiUrl> npm run smoke
 ```
 
-It takes over a minute, because it waits for the poller to resolve a guess. Each run reserves an alias of the form `smoke_xxxxxxxx` for good.
+It takes over a minute, because it waits for the resolver to resolve a guess. Each run reserves an alias of the form `smoke_xxxxxxxx` for good.

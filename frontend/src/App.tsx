@@ -9,7 +9,7 @@ const usd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' 
 
 const GUESS_ERRORS: Record<string, string> = {
   GUESS_OPEN: 'You already have a guess open.',
-  PRICE_STALE: 'The price feed is unavailable. Try again in a moment.',
+  PRICE_EXPIRED: 'That price has expired. Try again.',
 };
 
 export function App() {
@@ -22,16 +22,25 @@ export function App() {
   useEffect(() => {
     if (needsAlias) return;
     let stopped = false;
+    let inFlight = false;
     async function poll() {
-      const sentAfter = guesses.current;
-      const res = await request('/state');
-      const body = res.ok ? await res.json() : undefined;
-      if (stopped || guesses.current !== sentAfter) return;
-      if (res.status === 404) setNeedsAlias(true);
-      else if (body) {
-        setState(body);
-        const { price } = body as State;
-        if (price) setPoints((points) => addPoint(points, { value: price.value, time: price.observedAt }));
+      // Skipped while the last poll is in flight, so a slow Coinbase slows polling down instead of stacking requests
+      // that spread across API instances, each fetching for itself (D2).
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const sentAfter = guesses.current;
+        const res = await request('/state');
+        const body = res.ok ? await res.json() : undefined;
+        if (stopped || guesses.current !== sentAfter) return;
+        if (res.status === 404) setNeedsAlias(true);
+        else if (body) {
+          setState(body);
+          const { price } = body as State;
+          if (price) setPoints((points) => addPoint(points, { value: price.value, time: price.observedAt }));
+        }
+      } finally {
+        inFlight = false;
       }
     }
     // The chart's last minute, which also fills the gap left while polling was paused (D11). Kept even if
@@ -41,7 +50,7 @@ export function App() {
       // On failure the chart keeps what it has, nothing on load, and fills from polls.
       if (res.ok) setPoints((await res.json()).points);
     }
-    // A hidden tab doesn't poll, so a forgotten one doesn't keep the poller running (D10).
+    // A hidden tab doesn't poll, so a forgotten one doesn't make the API fetch prices nobody sees (D10).
     let timer: ReturnType<typeof setInterval> | undefined;
     function pollWhileVisible() {
       clearInterval(timer);
@@ -91,7 +100,7 @@ function Game({ state, points, onGuessed }: { state: State; points: PricePoint[]
         Playing as <strong>{alias}</strong> · Score <strong>{score}</strong>
       </p>
       <p>BTC/USD</p>
-      <p className="price">{price ? usd.format(Number(price.value)) : 'waiting for the first price'}</p>
+      <p className="price">{price ? usd.format(Number(price.value)) : 'Price feed unavailable'}</p>
       {price?.stale && (
         <p>
           Price feed unavailable · last updated {Math.round((Date.now() - Date.parse(price.observedAt)) / 1_000)} s ago
@@ -124,7 +133,11 @@ function GuessButtons({ state: { price, openGuess }, onGuessed }: { state: State
     setPending(true);
     setMessage('');
     try {
-      const res = await request('/guess', { method: 'POST', body: JSON.stringify({ direction }) });
+      // Names the price on screen, sent back exactly as the server sent it (D4).
+      const res = await request('/guess', {
+        method: 'POST',
+        body: JSON.stringify({ direction, priceObservedAt: price?.observedAt }),
+      });
       const body = await res.json();
       if (res.status === 201) return onGuessed(body);
       // The next poll shows the real state, so the message only needs to stay briefly.

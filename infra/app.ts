@@ -4,13 +4,13 @@ import { CorsHttpMethod, HttpApi, HttpMethod } from 'aws-cdk-lib/aws-apigatewayv
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import { Distribution, ViewerProtocolPolicy } from 'aws-cdk-lib/aws-cloudfront';
 import { S3BucketOrigin } from 'aws-cdk-lib/aws-cloudfront-origins';
-import { AttributeType, ProjectionType, TableV2 } from 'aws-cdk-lib/aws-dynamodb';
-import { Rule, Schedule } from 'aws-cdk-lib/aws-events';
-import { LambdaFunction } from 'aws-cdk-lib/aws-events-targets';
+import { AttributeType, TableV2 } from 'aws-cdk-lib/aws-dynamodb';
 import { Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
+import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
 import { NodejsFunction, type NodejsFunctionProps } from 'aws-cdk-lib/aws-lambda-nodejs';
 import { Bucket } from 'aws-cdk-lib/aws-s3';
 import { BucketDeployment, Source } from 'aws-cdk-lib/aws-s3-deployment';
+import { Queue } from 'aws-cdk-lib/aws-sqs';
 import type { Construct } from 'constructs';
 
 class BtcUpDownStack extends Stack {
@@ -19,42 +19,35 @@ class BtcUpDownStack extends Stack {
 
     const table = new TableV2(this, 'Table', {
       partitionKey: { name: 'pk', type: AttributeType.STRING },
-      // Sparse: only players with an open guess have guessStatus. The poller finds due guesses here (§5).
-      globalSecondaryIndexes: [
-        {
-          indexName: 'open-guesses',
-          partitionKey: { name: 'guessStatus', type: AttributeType.STRING },
-          sortKey: { name: 'guessedAt', type: AttributeType.STRING },
-          projectionType: ProjectionType.INCLUDE,
-          nonKeyAttributes: ['guessDirection', 'guessEntryPrice'],
-        },
-      ],
+      // Price items expire an hour after they're fetched (§5).
+      timeToLiveAttribute: 'expiresAt',
     });
+
+    // One message per guess, delayed 60 s (D5). No dead-letter queue: a message that keeps failing is retried until
+    // retention ends, and the GET /state backup still resolves its guess when the player returns (§10).
+    const queue = new Queue(this, 'ResolveQueue');
 
     const lambda = (id: string, file: string, props: NodejsFunctionProps = {}) =>
       new NodejsFunction(this, id, {
         entry: path.join(__dirname, '../backend/src', file),
         runtime: Runtime.NODEJS_22_X,
         architecture: Architecture.ARM_64,
-        environment: { TABLE_NAME: table.tableName },
+        environment: { TABLE_NAME: table.tableName, QUEUE_URL: queue.queueUrl },
         ...props,
       });
 
-    // Invoked every minute; each run loops for ~70 s at one tick per second (D2), or exits if the app is idle (D10).
-    // 192 MB leaves headroom: at 128 MB it peaked at 113 MB before it resolved guesses.
-    const poller = lambda('Poller', 'poller.ts', { memorySize: 192, timeout: Duration.seconds(90) });
-    table.grantReadWriteData(poller);
-    new Rule(this, 'PollerSchedule', {
-      schedule: Schedule.rate(Duration.minutes(1)),
-      targets: [new LambdaFunction(poller)],
-    });
+    // 256 MB like the API, for the same Coinbase call. The 10 s timeout stays below the queue's 30 s visibility timeout.
+    const resolver = lambda('Resolver', 'resolver.ts', { memorySize: 256, timeout: Duration.seconds(10) });
+    table.grantReadWriteData(resolver);
+    // Re-sends the message while the price hasn't moved or Coinbase is down (D5).
+    queue.grantSendMessages(resolver);
+    resolver.addEventSource(new SqsEventSource(queue, { batchSize: 1 }));
 
     // CPU scales with memory. At 128 MB, a cold GET /price/history took up to 2.6 s, against a 2 s Coinbase timeout.
     const apiHandler = lambda('ApiHandler', 'api.ts', { memorySize: 256 });
     table.grantReadWriteData(apiHandler);
-    // GET /state starts the poller when the price shows it has stopped (D10).
-    apiHandler.addEnvironment('POLLER_FUNCTION_NAME', poller.functionName);
-    poller.grantInvoke(apiHandler);
+    // POST /guess sends each guess's message (D5).
+    queue.grantSendMessages(apiHandler);
     const api = new HttpApi(this, 'Api', {
       corsPreflight: {
         allowOrigins: ['*'],

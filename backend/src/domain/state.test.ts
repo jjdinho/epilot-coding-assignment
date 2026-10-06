@@ -5,10 +5,11 @@ describe('buildState', () => {
   const player = { alias: 'Satoshi', score: 0 };
   const now = new Date('2026-10-02T14:48:40.000Z');
 
-  it('shows the latest tick and whether it is stale', () => {
-    const tick = { price: '86024.74', observedAt: '2026-10-02T14:48:33.000Z' };
-    expect(buildState(player, tick, now)).toEqual({
-      price: { value: '86024.74', observedAt: '2026-10-02T14:48:33.000Z', stale: true },
+  const price = { price: '86024.74', exchangeTime: '2026-10-02T14:48:36.901234Z', observedAt: '2026-10-02T14:48:37.000Z' };
+
+  it('shows the price and whether it is stale', () => {
+    expect(buildState(player, price, now)).toEqual({
+      price: { value: '86024.74', observedAt: '2026-10-02T14:48:37.000Z', stale: false },
       alias: 'Satoshi',
       score: 0,
       openGuess: null,
@@ -16,12 +17,12 @@ describe('buildState', () => {
     });
   });
 
-  it('has no price before the first tick', () => {
-    expect(buildState(player, undefined, now).price).toBeNull();
+  it('marks a price 3.001 s old as stale', () => {
+    expect(buildState(player, { ...price, observedAt: '2026-10-02T14:48:36.999Z' }, now).price?.stale).toBe(true);
   });
 
-  it('has no price when a visit created the price item before the first tick', () => {
-    expect(buildState(player, { lastVisitAt: '2026-10-02T14:48:39.000Z' }, now).price).toBeNull();
+  it('has no price when there is none', () => {
+    expect(buildState(player, undefined, now).price).toBeNull();
   });
 
   it('shows the open guess and the last result', () => {

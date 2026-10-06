@@ -11,12 +11,11 @@ export interface Player {
   lastResult?: LastResult;
 }
 
-// The PRICE#LATEST item (§5). A visit creates it if it's missing, so it can exist before the first tick (D10).
+// A price the API fetched and recorded (D2, §5).
 export interface PriceItem {
-  price?: string;
-  observedAt?: string;
-  lastVisitAt?: string;
-  startRequestedAt?: string;
+  price: string;
+  exchangeTime: string;
+  observedAt: string;
 }
 
 export interface State {
@@ -30,9 +29,10 @@ export interface State {
 // The response of GET /state, POST /player and POST /guess (§6).
 export function buildState(player: Player, priceItem: PriceItem | undefined, now: Date): State {
   const { guessDirection: direction, guessEntryPrice: entryPrice, guessedAt } = player;
-  const { price: value, observedAt } = priceItem ?? {};
   return {
-    price: value && observedAt ? { value, observedAt, stale: isStale(observedAt, now) } : null,
+    price: priceItem
+      ? { value: priceItem.price, observedAt: priceItem.observedAt, stale: isStale(priceItem.observedAt, now) }
+      : null,
     alias: player.alias,
     score: player.score,
     openGuess: direction && entryPrice && guessedAt ? { direction, entryPrice, guessedAt } : null,

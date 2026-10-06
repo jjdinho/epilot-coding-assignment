@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { dueCutoff, isValidDirection, scoreGuess } from './guess';
+import { isOverdue, isValidDirection, scoreGuess } from './guess';
 
 describe('isValidDirection', () => {
   it.each(['UP', 'DOWN'])('accepts %s', (direction) => {
@@ -32,8 +32,14 @@ describe('scoreGuess', () => {
   });
 });
 
-describe('dueCutoff', () => {
-  it('is the ISO string for 60 s before now', () => {
-    expect(dueCutoff(new Date('2026-10-02T14:48:33.000Z'))).toBe('2026-10-02T14:47:33.000Z');
+describe('isOverdue', () => {
+  const guessedAt = '2026-10-02T14:48:33.000Z';
+
+  it('is not overdue exactly 2 minutes after the guess', () => {
+    expect(isOverdue(guessedAt, new Date('2026-10-02T14:50:33.000Z'))).toBe(false);
+  });
+
+  it('is overdue just over 2 minutes after the guess', () => {
+    expect(isOverdue(guessedAt, new Date('2026-10-02T14:50:33.001Z'))).toBe(true);
   });
 });

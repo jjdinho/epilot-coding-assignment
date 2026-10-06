@@ -1,20 +1,24 @@
 import { ConditionalCheckFailedException, TransactionCanceledException } from '@aws-sdk/client-dynamodb';
-import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
-import { GetCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, PutCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEventV2, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
-import { db, PRICE_KEY, TABLE_NAME } from './db';
-import { shouldRecordVisit, shouldStartPoller, startCutoff, visitCutoff } from './domain/activity';
-import { isValidDirection } from './domain/guess';
+import { db, TABLE_NAME } from './db';
+import { isOverdue, isValidDirection, RESOLVE_AFTER_MS, scoreGuess } from './domain/guess';
 import { priceHistory, type Trade } from './domain/history';
 import { aliasKey, isValidAlias, isValidPlayerId } from './domain/player';
-import { isStale } from './domain/price';
+import { isStale, isValidObservedAt, priceKey, shouldFetch } from './domain/price';
 import { buildState, type Player, type PriceItem } from './domain/state';
+import { resolveGuess, sendResolveMessage } from './guesses';
+import { fetchTicker } from './ticker';
 
 type Result = APIGatewayProxyStructuredResultV2;
 
 const TRADES_URL = 'https://api.exchange.coinbase.com/products/BTC-USD/trades?limit=1000';
+// Price items are kept this long for debugging. Nothing depends on them once a guess is made (§5).
+const PRICE_EXPIRY_S = 3_600;
 
-const lambda = new LambdaClient({});
+// This instance's last recorded price and its last Coinbase attempt (D2). An instance handles one request at a time.
+let cachedPrice: PriceItem | undefined;
+let lastAttemptAt: string | undefined;
 
 export async function handler(event: APIGatewayProxyEventV2): Promise<Result> {
   // Checked before any DynamoDB access, so a client can't address the price or alias items (D6).
@@ -26,8 +30,10 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<Result> {
       return getState(playerId);
     case 'POST /player':
       return createPlayer(playerId, parseBody(event.body)?.alias);
-    case 'POST /guess':
-      return createGuess(playerId, parseBody(event.body)?.direction);
+    case 'POST /guess': {
+      const body = parseBody(event.body);
+      return createGuess(playerId, body?.direction, body?.priceObservedAt);
+    }
     case 'GET /price/history':
       return getPriceHistory();
     default:
@@ -36,41 +42,40 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<Result> {
 }
 
 async function getState(playerId: string): Promise<Result> {
-  const [player, priceItem] = await Promise.all([getItem<Player>(playerId), getItem<PriceItem>(PRICE_KEY)]);
-  if (!player) return error(404, 'PLAYER_NOT_FOUND');
   const now = new Date();
-  await keepPollerRunning(priceItem, now);
-  return json(200, buildState(player, priceItem, now));
+  const [player, price] = await Promise.all([getItem<Player>(playerId), currentPrice(now)]);
+  if (!player) return error(404, 'PLAYER_NOT_FOUND');
+  return json(200, buildState(await resolveIfOverdue(playerId, player, price, now), price, now));
 }
 
-// Each poll is a visit, which keeps the poller running. A price that has gone stale means it stopped (D10).
-async function keepPollerRunning(priceItem: PriceItem | undefined, now: Date): Promise<void> {
-  // Written before the start: a new run exits straight away unless it finds a recent visit.
-  if (shouldRecordVisit(priceItem, now)) await setTimeIfBefore('lastVisitAt', visitCutoff(now), now);
-  if (shouldStartPoller(priceItem, now) && (await setTimeIfBefore('startRequestedAt', startCutoff(now), now))) {
-    // Asynchronous, so the response doesn't wait for the run.
-    await lambda.send(new InvokeCommand({ FunctionName: process.env.POLLER_FUNCTION_NAME, InvocationType: 'Event' }));
-  }
-}
-
-// Sets a time on the price item to now if it's missing or before the cutoff. False if another request set it first.
-async function setTimeIfBefore(name: 'lastVisitAt' | 'startRequestedAt', cutoff: string, now: Date): Promise<boolean> {
+// Fetched from Coinbase at most once a second per instance, and recorded before it's returned (D2). If the fetch or
+// the write fails, the cached price, which may be stale or missing. Never a price that wasn't recorded.
+async function currentPrice(now: Date): Promise<PriceItem | undefined> {
+  if (!shouldFetch(lastAttemptAt, now)) return cachedPrice;
+  lastAttemptAt = now.toISOString();
   try {
-    await db.send(
-      new UpdateCommand({
-        TableName: TABLE_NAME,
-        Key: { pk: PRICE_KEY },
-        UpdateExpression: 'SET #time = :now',
-        ConditionExpression: 'attribute_not_exists(#time) OR #time < :cutoff',
-        ExpressionAttributeNames: { '#time': name },
-        ExpressionAttributeValues: { ':now': now.toISOString(), ':cutoff': cutoff },
-      }),
-    );
-    return true;
+    const { price, exchangeTime } = await fetchTicker();
+    const observedAt = new Date().toISOString();
+    const item = { price, exchangeTime, observedAt };
+    const expiresAt = Math.floor(Date.parse(observedAt) / 1_000) + PRICE_EXPIRY_S;
+    // Awaited, so a guess can name this price as soon as a client has it (D4).
+    await db.send(new PutCommand({ TableName: TABLE_NAME, Item: { pk: priceKey(observedAt), ...item, expiresAt } }));
+    cachedPrice = item;
   } catch (err) {
-    if (err instanceof ConditionalCheckFailedException) return false;
-    throw err;
+    console.error('Price fetch failed', err);
   }
+  return cachedPrice;
+}
+
+// Backup for a lost message: a guess still open 2 minutes after it was made resolves at the price about to be
+// returned (D5). If a late message resolves it at the same moment, the conditional write lets only one through.
+async function resolveIfOverdue(playerId: string, player: Player, price: PriceItem | undefined, now: Date): Promise<Player> {
+  const { guessDirection: direction, guessEntryPrice: entryPrice, guessedAt } = player;
+  if (!direction || !entryPrice || !guessedAt || !isOverdue(guessedAt, now)) return player;
+  if (!price || isStale(price.observedAt, now)) return player;
+  const delta = scoreGuess(direction, entryPrice, price.price);
+  if (delta === null) return player;
+  return (await resolveGuess({ playerId, direction, entryPrice, guessedAt }, delta, price.price, price.observedAt)) ?? player;
 }
 
 async function createPlayer(playerId: string, alias: unknown): Promise<Result> {
@@ -99,39 +104,46 @@ async function createPlayer(playerId: string, alias: unknown): Promise<Result> {
     if (aliasReason?.Code === 'ConditionalCheckFailed') return error(409, 'ALIAS_TAKEN');
     throw err;
   }
-  return json(201, buildState(player, await getItem<PriceItem>(PRICE_KEY), new Date()));
+  const now = new Date();
+  return json(201, buildState(player, await currentPrice(now), now));
 }
 
-async function createGuess(playerId: string, direction: unknown): Promise<Result> {
+async function createGuess(playerId: string, direction: unknown, priceObservedAt: unknown): Promise<Result> {
   if (!isValidDirection(direction)) return error(400, 'INVALID_DIRECTION');
-
+  // Checked before any DynamoDB access, so a client can only address price items (D4).
+  if (!isValidObservedAt(priceObservedAt)) return error(400, 'INVALID_PRICE_OBSERVED_AT');
   const now = new Date();
-  const priceItem = await getItem<PriceItem>(PRICE_KEY);
-  // Guessing against an old price would give hindsight (D8). The poller sets price and observedAt together.
-  if (!priceItem?.observedAt || isStale(priceItem.observedAt, now)) return error(503, 'PRICE_STALE');
+  // The item's key is its observedAt, so this enforces the 3 s window even for an item TTL hasn't deleted yet (D4, §5).
+  if (isStale(priceObservedAt, now)) return error(409, 'PRICE_EXPIRED');
 
+  // Checked before the send, so a refused guess costs no message, resolver run or Coinbase call (D5).
+  const [player, priceItem] = await Promise.all([
+    getItem<Player>(playerId),
+    getItem<PriceItem>(priceKey(priceObservedAt)),
+  ]);
+  if (!player) return error(404, 'PLAYER_NOT_FOUND');
+  if (player.guessedAt) return error(409, 'GUESS_OPEN');
+  if (!priceItem) return error(409, 'PRICE_EXPIRED');
+
+  const guessedAt = now.toISOString();
+  // Sent before the save, so every saved guess has a message. If the send throws, nothing is saved (D5).
+  await sendResolveMessage({ playerId, direction, entryPrice: priceItem.price, guessedAt }, RESOLVE_AFTER_MS / 1_000);
   try {
     const { Attributes } = await db.send(
       new UpdateCommand({
         TableName: TABLE_NAME,
         Key: { pk: playerId },
-        UpdateExpression:
-          'SET #guessDirection = :direction, #guessEntryPrice = :entryPrice, #guessedAt = :guessedAt, #guessStatus = :open',
-        // One open guess at a time, and only for an existing player.
-        ConditionExpression: 'attribute_exists(#pk) AND attribute_not_exists(#guessStatus)',
+        UpdateExpression: 'SET #guessDirection = :direction, #guessEntryPrice = :entryPrice, #guessedAt = :guessedAt',
+        // One open guess at a time, and only for an existing player. Fails only if another request saved a guess
+        // since the read above. This request's message then finds a different guessedAt and does nothing (§5).
+        ConditionExpression: 'attribute_exists(#pk) AND attribute_not_exists(#guessedAt)',
         ExpressionAttributeNames: {
           '#pk': 'pk',
           '#guessDirection': 'guessDirection',
           '#guessEntryPrice': 'guessEntryPrice',
           '#guessedAt': 'guessedAt',
-          '#guessStatus': 'guessStatus',
         },
-        ExpressionAttributeValues: {
-          ':direction': direction,
-          ':entryPrice': priceItem.price,
-          ':guessedAt': now.toISOString(),
-          ':open': 'OPEN',
-        },
+        ExpressionAttributeValues: { ':direction': direction, ':entryPrice': priceItem.price, ':guessedAt': guessedAt },
         ReturnValues: 'ALL_NEW',
         ReturnValuesOnConditionCheckFailure: 'ALL_OLD',
       }),
@@ -157,7 +169,7 @@ async function getPriceHistory(): Promise<Result> {
   }
 }
 
-// Consistent, so a poll right after POST /player finds the new player.
+// Consistent, so a poll right after POST /player finds the new player, and a guess finds the price its poll returned.
 async function getItem<T>(pk: string): Promise<T | undefined> {
   const { Item } = await db.send(new GetCommand({ TableName: TABLE_NAME, Key: { pk }, ConsistentRead: true }));
   return Item as T | undefined;
