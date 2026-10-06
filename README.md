@@ -6,11 +6,25 @@ A web game: guess whether the BTC/USD price will be higher or lower in a minute.
 
 <img src="docs/screenshot.png" alt="The game: score, live BTC/USD price and chart, an open guess counting down, and the last two results" width="360">
 
-Pick an alias, then watch the live price and a chart of its last minute. Press Up or Down. At least 60 seconds later, once the price has moved, the guess resolves: +1 if you were right, −1 if not. One guess can be open at a time. Your score stays with your browser, so you can close the tab and come back, even with a guess open: it resolves on time without you.
+## How to play
+
+- Pick an alias.
+- Watch the live price and its last-minute chart, then press Up or Down.
+- ~60 seconds later, once the price has moved, the guess resolves: +1 if you were right, −1 if not.
+- One guess can be open at a time.
+- Your score stays with your browser. You can close the tab and come back: an open guess still resolves on time.
 
 ## Architecture
 
-A static React page on S3 and CloudFront polls an HTTP API (API Gateway and one Lambda) every second while its tab is visible. The API fetches the price from Coinbase's public ticker when a page asks for it, at most once a second per Lambda instance. A guess takes the price the API holds when it arrives, which must be under 3 seconds old. The API then sends an SQS message delayed by 60 seconds and saves the guess in DynamoDB. When the message arrives, a resolver Lambda fetches the price. If the price has moved, it scores the guess with a conditional write, so a duplicate message can't score it twice. If it hasn't, the resolver sends the message again with a 2-second delay. Nothing is scheduled, so nothing runs while nobody plays. The chart's last minute comes from Coinbase's recent trades, through the API. All of it is one CDK stack in `eu-north-1`. The decisions behind it, and the alternatives we rejected, are in [docs/design.md](docs/design.md).
+- **Frontend:** a static React page on S3 and CloudFront. It polls the API every second while its tab is visible.
+- **API:** API Gateway and one Lambda. It fetches the price from Coinbase's public ticker on request, at most once a second per instance.
+- **Guess:** takes the price the API holds when it arrives, which must be under 3 seconds old. The API sends an SQS message delayed by 60 seconds, then saves the guess in DynamoDB.
+- **Resolver:** a Lambda triggered by that message. It fetches the price and, if it has moved, scores the guess with a conditional write, so a duplicate message can't score it twice. If not, it resends the message with a 2-second delay.
+- **Chart:** the last minute of Coinbase's recent trades, through the API.
+- **No schedules:** nothing runs while nobody plays.
+- **Infra:** one CDK stack in `eu-north-1`.
+
+The decisions behind it, and the alternatives we rejected, are in [docs/design.md](docs/design.md).
 
 ## Layout
 
@@ -37,7 +51,7 @@ npm run build   # typecheck everything and build the frontend
 npm run synth   # cdk synth, after npm run build; needs no AWS credentials
 ```
 
-The unit tests cover the pure rules: player ID, alias and price checks, price staleness, scoring, reducing Coinbase trades to the chart's history, and the client's countdown, chart window, price trend, line colours and guess history. The Lambda handlers stay thin and aren't unit-tested. The smoke test covers them.
+Unit tests cover the pure rules: player ID, alias and price checks, price staleness, scoring, the chart's history from Coinbase trades, and the client's countdown, chart window, price trend, line colours and guess history. The thin Lambda handlers are covered by the smoke test instead.
 
 ## Deploy
 
@@ -55,7 +69,7 @@ Then build and deploy:
 npm run deploy
 ```
 
-It doesn't stop to confirm IAM changes (`requireApproval` is `never` in `infra/cdk.json`). The first deploy takes about 4 minutes, mostly for CloudFront. Later ones take about a minute. The stack outputs `SiteUrl`, the game, and `ApiUrl`. To read them again later, with the AWS CLI:
+IAM changes deploy without a prompt (`requireApproval: never` in `infra/cdk.json`). The first deploy takes about 4 minutes, mostly CloudFront; later ones about a minute. The stack outputs `SiteUrl` (the game) and `ApiUrl`. To read them again:
 
 ```sh
 aws cloudformation describe-stacks --stack-name BtcUpDown --region eu-north-1 --query 'Stacks[0].Outputs'
@@ -75,22 +89,22 @@ It plays one new player through the API: the player ID and alias checks, the cha
 
 ## Trade-offs
 
-The design accepts these, for a game this size. The D numbers are the decisions in [docs/design.md](docs/design.md#4-decisions).
+All trade-off decisions were made to prioritize simplicity and fairness. The design accepts these, for a game this size. The D numbers are the decisions in [docs/design.md](docs/design.md#4-decisions).
 
-- **The entry price can differ from the headline (D4).** A guess takes the price the server holds when it arrives, not the one on screen. The page polls once a second, so the two are often the same and otherwise up to a second of movement apart, as likely for the player as against. The open-guess panel shows the entry price as soon as the guess is accepted. The alternative, honoring the price the player names, would let anyone calling the API pick the best of the last few seconds.
-- **A lost message resolves late (D5).** Each guess resolves from its own SQS message. If one were lost, the guess would resolve on the player's next visit, once it's 2 minutes old, at that moment's price rather than on time.
-- **The player ID is the only credential (D6).** There's no sign-in. The browser keeps a random ID in local storage, and the last five results next to it, since the server stores only the latest. Clearing storage, a private window or another device starts a new player at 0. Anyone holding the ID plays as that player, so the page never shows it.
-- **A cleared player's alias stays reserved (D9).** A player who clears storage can't reclaim their alias. It stays with the abandoned record, because without sign-in the server can't tell it's the same person.
-- **The chart is approximate, and the price can step back (D11, D2).** The chart's history is the last trade in each second, while the API samples partway through a second, so the chart can show a price the server never fetched. The guess panel shows the entry and resolution prices, which are the ones that count. Each API instance also caches its own price, so the headline price can briefly step back when two instances hold prices fetched a moment apart.
-- **Coinbase calls scale with use (D2).** One per second per warm API instance, plus one per open guess at each check. That's a few calls a second at this traffic, well under Coinbase's public limit of 10 requests a second. At scale, a shared price cache would be needed.
+- **The server picks the entry price (D4):** it can differ from the price on screen by a second's movement, but no player can spoof it.
+- **One delayed SQS message resolves each guess (D5):** if it were lost, the guess would resolve late, on the player's next visit, but nothing runs between guesses, and resiliency can be added later if deemed necessary.
+- **The player ID in local storage is the only credential (D6):** a new browser or cleared storage starts a new player at 0, but there's no sign-up.
+- **Aliases are unique without sign-in (D9):** a player who clears storage loses theirs for good, but names never clash.
+- **The chart's history comes from Coinbase's recent trades (D11):** it can show a price the server never fetched, but it's full on load with nothing stored.
+- **Each API instance fetches its own price on demand (D2):** Coinbase calls grow with traffic and the price can briefly step back, but nothing runs while nobody plays.
 
 ## What we didn't do
 
-Authentication, a mobile layout and a leaderboard could all come later, if the game found its fit with players. More in [design §9](docs/design.md#9-what-we-didnt-do).
+These features were consciously left out. They aren't needed yet, but can be added if the game needs more resiliency, scalability or a better UX. More in [design §9](docs/design.md#9-what-we-didnt-do).
 
-- **Authentication.** The brief doesn't ask for it, and fairness doesn't depend on it: the server picks both prices. Sign-in would add continuity across devices, at the cost of every reviewer signing up first. It would fit as a Cognito user pool with API Gateway's JWT authorizer.
-- **Alias changes and moderation.** Aliases are fixed once chosen and not checked for offensive words. A script could reserve many of them.
-- **A dead-letter queue.** A message that keeps failing is retried every 30 seconds for 4 days. The `GET /state` backup still resolves the guess when the player returns.
-- **A shared price cache, and a cap on the resolver's concurrency.** Both answer a scale the app isn't at (D2).
-- **A mobile layout.** The single column fits a phone but isn't designed for one. A mobile layout would pin the score, the price and the Up and Down buttons to the bottom of the screen, in reach while the player scrolls through results.
-- **A leaderboard.** Each player sees only their own game. A leaderboard could rank aliases through a new index on score, and would make the missing moderation matter more.
+- **Authentication.** Sign-in, such as a Cognito user pool, would keep a player's score across browsers and devices.
+- **Alias changes and moderation.** Aliases are fixed once chosen and aren't filtered for offensive words or bulk reservation.
+- **A dead-letter queue.** It would set aside a resolver message that keeps failing, instead of retrying it for a long time.
+- **A shared price cache, and a cap on the resolver's concurrency.** Both would bound Coinbase calls as traffic grows.
+- **A mobile layout.** It would pin the score, price and Up and Down buttons to the bottom of a phone's screen.
+- **A leaderboard.** It would rank players' aliases by score, which needs a new index and alias moderation.
