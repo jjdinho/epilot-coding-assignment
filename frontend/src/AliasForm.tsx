@@ -1,4 +1,7 @@
 import { useState, type FormEvent } from 'react';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import { request } from './api';
 
 const MESSAGES: Record<string, string> = {
@@ -20,11 +23,17 @@ export function AliasForm({ onJoined }: { onJoined: () => void }) {
   }
 
   return (
-    <form onSubmit={submit}>
-      <label htmlFor="alias">Choose an alias</label>{' '}
-      <input id="alias" value={alias} onChange={(e) => setAlias(e.target.value)} autoFocus />{' '}
-      <button type="submit">Play</button>
-      {message && <p role="alert">{message}</p>}
+    <form onSubmit={submit} className="grid gap-2">
+      <Label htmlFor="alias">Choose an alias</Label>
+      <div className="flex gap-2">
+        <Input id="alias" value={alias} onChange={(e) => setAlias(e.target.value)} autoFocus />
+        <Button type="submit">Play</Button>
+      </div>
+      {message && (
+        <p role="alert" className="text-sm text-destructive">
+          {message}
+        </p>
+      )}
     </form>
   );
 }
