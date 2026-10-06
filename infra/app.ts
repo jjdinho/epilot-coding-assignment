@@ -22,7 +22,7 @@ class BtcUpDownStack extends Stack {
     });
 
     // One message per guess, delayed 60 s (D5). No dead-letter queue: a message that keeps failing is retried until
-    // retention ends, and the GET /state backup still resolves its guess when the player returns (§10).
+    // retention ends, and the GET /state backup still resolves its guess when the player returns (§9).
     const queue = new Queue(this, 'ResolveQueue');
 
     const lambda = (id: string, file: string, props: NodejsFunctionProps = {}) =>
