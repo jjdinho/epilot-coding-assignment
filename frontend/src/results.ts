@@ -1,6 +1,6 @@
 import type { LastResult } from './api';
 
-export const RESULTS_SHOWN = 5;
+const RESULTS_SHOWN = 5;
 
 // The player's latest results, newest first, one per guess.
 export function addResult(results: LastResult[], result: LastResult | null): LastResult[] {
