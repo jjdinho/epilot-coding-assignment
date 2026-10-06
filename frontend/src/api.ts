@@ -1,8 +1,8 @@
-import type { Direction } from '../../backend/src/domain/guess';
+import type { Direction, LastResult } from '../../backend/src/domain/guess';
 import type { PricePoint } from '../../backend/src/domain/history';
 import type { State } from '../../backend/src/domain/state';
 
-export type { Direction, PricePoint, State };
+export type { Direction, LastResult, PricePoint, State };
 
 // Written into the site bucket at deploy time.
 const config: Promise<{ apiUrl: string }> = fetch('/config.json').then((res) => res.json());
