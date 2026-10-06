@@ -336,6 +336,8 @@ Conventions the code follows:
 
 ## 10. What we didn't do
 
+Authentication, a mobile layout and a leaderboard are left for later. Each would earn its place once the game found its fit with players.
+
 ### Authentication
 
 **Why not.** The brief doesn't ask for it, and the game's fairness doesn't depend on it. The server picks both the entry and the resolution price (D4), and holds the lock for each player, so a signed-in player couldn't do anything an anonymous one can't. What auth would add is continuity: the same player on another device, after clearing storage, or in a private window, with their alias intact. The cost is that every reviewer would have to sign up and confirm an email before seeing the game. Building the sign-up and sign-in flows, email verification, and a test user for the smoke test would also take a large share of the half-day budget.

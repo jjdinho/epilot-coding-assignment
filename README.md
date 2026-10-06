@@ -84,7 +84,7 @@ The design accepts these, for a game this size. The D numbers are the decisions 
 
 ## What we didn't do
 
-More in [design §10](docs/design.md#10-what-we-didnt-do).
+Authentication, a mobile layout and a leaderboard could all come later, if the game found its fit with players. More in [design §10](docs/design.md#10-what-we-didnt-do).
 
 - **Authentication.** The brief doesn't ask for it, and fairness doesn't depend on it: the server picks both the entry and the resolution price itself. Sign-in would add continuity across devices, at the cost of every reviewer signing up first. It would fit as a Cognito user pool with API Gateway's JWT authorizer, taking the player ID from the token instead of the `X-Player-Id` header.
 - **Alias changes and moderation.** Aliases are fixed once chosen and not checked for offensive words. A script could reserve many of them.
