@@ -8,7 +8,8 @@
     "jsx": "react-jsx",
     "strict": true,
     "noEmit": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "paths": { "@/*": ["./frontend/src/*"] }
   },
   "include": ["backend", "frontend", "infra", "smoke"],
   "exclude": ["**/node_modules", "frontend/dist", "infra/cdk.out"]

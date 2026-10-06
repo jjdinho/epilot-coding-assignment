@@ -13,7 +13,7 @@ A static React page on S3 and CloudFront polls an HTTP API (API Gateway and one 
 ## Layout
 
 - `backend/`: the API and resolver Lambdas. Pure game rules live in `backend/src/domain`, with their tests.
-- `frontend/`: Vite + React single page.
+- `frontend/`: Vite + React single page, styled with Tailwind and shadcn/ui (generated components in `frontend/src/components/ui`).
 - `infra/`: the CDK app, one stack in `eu-north-1`.
 - `smoke/`: smoke test against the deployed API.
 
@@ -35,7 +35,7 @@ npm run build   # typecheck everything and build the frontend
 npm run synth   # cdk synth, after npm run build; needs no AWS credentials
 ```
 
-The unit tests cover the pure rules: player ID and alias checks, price staleness, scoring, reducing Coinbase trades to the chart's history, and the client's countdown and chart window. The Lambda handlers stay thin and aren't unit-tested. The smoke test covers them.
+The unit tests cover the pure rules: player ID and alias checks, price staleness, scoring, reducing Coinbase trades to the chart's history, and the client's countdown, chart window, price trend, line colours and guess history. The Lambda handlers stay thin and aren't unit-tested. The smoke test covers them.
 
 ## Deploy
 
@@ -77,7 +77,7 @@ The design accepts these, for a game this size. The D numbers are the decisions 
 
 - **Up to 3 seconds of hindsight (D4).** A guess names the price on the player's screen, and the server honors it for 3 seconds after fetching it. A player watching a faster feed elsewhere could see a move, then guess against the older price on our screen. A shorter window means less hindsight, but more honest guesses refused as expired.
 - **A lost message resolves late (D5).** Each guess resolves from its own SQS message. If one were lost, the guess would resolve on the player's next visit, once it's 2 minutes old, at that moment's price rather than on time.
-- **The player ID is the only credential (D6).** There's no sign-in. The browser keeps a random ID in local storage. Clearing storage, a private window or another device starts a new player at 0. Anyone holding the ID plays as that player, so the page never shows it.
+- **The player ID is the only credential (D6).** There's no sign-in. The browser keeps a random ID in local storage, and the last five results next to it, since the server stores only the latest. Clearing storage, a private window or another device starts a new player at 0. Anyone holding the ID plays as that player, so the page never shows it.
 - **A cleared player's alias stays reserved (D9).** A player who clears storage can't reclaim their alias. It stays with the abandoned record, because without sign-in the server can't tell it's the same person.
 - **The chart is approximate, and the price can step back (D11, D2).** The chart's history is the last trade in each second, while the API samples partway through a second, so the chart can show a price the server never recorded. The guess panel shows the entry and resolution prices, which are the ones that count. Each API instance also caches its own price, so the headline price can briefly step back when two instances hold prices fetched a moment apart.
 - **Coinbase calls scale with use (D2).** One per second per warm API instance, plus one per open guess at each check. That's a few calls a second at this traffic, well under Coinbase's public limit of 10 requests a second. At scale, a shared price cache would be needed.

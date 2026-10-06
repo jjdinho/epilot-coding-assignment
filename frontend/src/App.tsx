@@ -1,11 +1,25 @@
-import { useEffect, useRef, useState } from 'react';
+import { ArrowDown, ArrowUp, Check, Minus, TrendingDown, TrendingUp, X, type LucideIcon } from 'lucide-react';
+import { Fragment, useEffect, useRef, useState } from 'react';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { AliasForm } from './AliasForm';
-import { request, type Direction, type PricePoint, type State } from './api';
-import { addPoint } from './chart';
+import { request, type Direction, type LastResult, type PricePoint, type State } from './api';
+import { addPoint, change } from './chart';
 import { secondsLeft } from './countdown';
+import { clock, usd } from './format';
 import { PriceChart } from './PriceChart';
+import { RESULTS_SHOWN, storeResult } from './results';
 
-const usd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
+const signedUsd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', signDisplay: 'exceptZero' });
+const percent = new Intl.NumberFormat('en-US', { style: 'percent', minimumFractionDigits: 3, signDisplay: 'exceptZero' });
+
+// The trend badge's icon and colour, by the sign of the price's change.
+const TRENDS: Record<number, { Icon: LucideIcon; className: string }> = {
+  1: { Icon: TrendingUp, className: 'border-green-600/30 bg-green-50 text-green-700' },
+  0: { Icon: Minus, className: '' },
+  [-1]: { Icon: TrendingDown, className: 'border-red-600/30 bg-red-50 text-red-700' },
+};
 
 const GUESS_ERRORS: Record<string, string> = {
   GUESS_OPEN: 'You already have a guess open.',
@@ -16,6 +30,7 @@ export function App() {
   const [state, setState] = useState<State>();
   const [needsAlias, setNeedsAlias] = useState(false);
   const [points, setPoints] = useState<PricePoint[]>([]);
+  const [results, setResults] = useState<LastResult[]>([]);
   // Counts accepted guesses, so a poll sent before one can't overwrite the state it returned.
   const guesses = useRef(0);
 
@@ -36,7 +51,8 @@ export function App() {
         if (res.status === 404) setNeedsAlias(true);
         else if (body) {
           setState(body);
-          const { price } = body as State;
+          const { price, lastResult } = body as State;
+          setResults(storeResult(lastResult));
           if (price) setPoints((points) => addPoint(points, { value: price.value, time: price.observedAt }));
         }
       } finally {
@@ -74,53 +90,148 @@ export function App() {
   }
 
   return (
-    <main>
-      <h1>BTC Up/Down</h1>
+    <main className="mx-auto flex max-w-md flex-col gap-4 px-4 py-8">
+      <h1 className="scroll-m-20 text-4xl font-extrabold tracking-tight text-balance">BTC Up/Down</h1>
       {needsAlias ? (
         <>
           <AliasForm onJoined={() => setNeedsAlias(false)} />
           <PriceChart points={points} />
         </>
       ) : state ? (
-        <Game state={state} points={points} onGuessed={onGuessed} />
+        <Game state={state} points={points} results={results} onGuessed={onGuessed} />
       ) : (
-        <p>Loading…</p>
+        <p className="text-muted-foreground">Loading…</p>
       )}
     </main>
   );
 }
 
-function Game({ state, points, onGuessed }: { state: State; points: PricePoint[]; onGuessed: (state: State) => void }) {
-  const { alias, score, price, openGuess, lastResult } = state;
-  // Re-rendered by every poll, so the countdown ticks once a second.
-  const left = openGuess && secondsLeft(openGuess.guessedAt, Date.now());
+function Game({
+  state,
+  points,
+  results,
+  onGuessed,
+}: {
+  state: State;
+  points: PricePoint[];
+  results: LastResult[];
+  onGuessed: (state: State) => void;
+}) {
+  const { alias, score, price, openGuess } = state;
   return (
     <>
-      <p>
-        Playing as <strong>{alias}</strong> · Score <strong>{score}</strong>
+      <p className="text-muted-foreground">
+        Playing as <strong className="text-foreground">{alias}</strong> · Score{' '}
+        <strong className="text-foreground">{score}</strong>
       </p>
-      <p>BTC/USD</p>
-      <p className="price">{price ? usd.format(Number(price.value)) : 'Price feed unavailable'}</p>
-      {price?.stale && (
-        <p>
-          Price feed unavailable · last updated {Math.round((Date.now() - Date.parse(price.observedAt)) / 1_000)} s ago
-        </p>
-      )}
+      <PriceCard price={price} points={points} />
       <PriceChart points={points} />
       <GuessButtons state={state} onGuessed={onGuessed} />
-      {openGuess && (
-        <p>
-          You guessed <strong>{openGuess.direction.toLowerCase()}</strong> from {usd.format(Number(openGuess.entryPrice))}.{' '}
-          {left ? `${left} s to go.` : 'Waiting for the price to move.'}
-        </p>
-      )}
-      {lastResult && (
-        <p>
-          Last guess: {lastResult.direction.toLowerCase()}, {usd.format(Number(lastResult.entryPrice))} →{' '}
-          {usd.format(Number(lastResult.resolvedPrice))}, <strong>{lastResult.delta > 0 ? '+1' : '-1'}</strong>
-        </p>
-      )}
+      <Guesses openGuess={openGuess} results={results} />
     </>
+  );
+}
+
+function PriceCard({ price, points }: { price: State['price']; points: PricePoint[] }) {
+  const trend = change(points);
+  return (
+    <Card className="@container/card">
+      {/* Two columns filled top to bottom: "BTC/USD" over the price, "Last minute" over the trend. One column when the
+          card is too narrow for both side by side. */}
+      <CardHeader className="grid-flow-col grid-cols-[1fr_auto] grid-rows-[auto_auto] @max-sm/card:grid-flow-row @max-sm/card:grid-cols-1">
+        <CardDescription>BTC/USD</CardDescription>
+        <CardTitle className="text-2xl font-semibold tabular-nums @[250px]/card:text-3xl">
+          {price ? usd.format(Number(price.value)) : 'Price feed unavailable'}
+        </CardTitle>
+        {price && trend && <Trend {...trend} />}
+      </CardHeader>
+      {price?.stale && (
+        <CardFooter className="text-sm text-muted-foreground">
+          Price feed unavailable · last updated {Math.round((Date.now() - Date.parse(price.observedAt)) / 1_000)} s ago
+        </CardFooter>
+      )}
+    </Card>
+  );
+}
+
+function Trend({ amount, fraction }: { amount: number; fraction: number }) {
+  const { Icon, className } = TRENDS[Math.sign(amount)];
+  return (
+    <>
+      <CardDescription className="justify-self-end @max-sm/card:justify-self-start">Last minute</CardDescription>
+      <Badge variant="outline" className={`self-center justify-self-end @max-sm/card:justify-self-start ${className}`}>
+        <Icon />
+        {signedUsd.format(amount)} ({percent.format(fraction)})
+      </Badge>
+    </>
+  );
+}
+
+// Newest first: the open guess, replaced by its result once a poll shows it resolved, then earlier results.
+function Guesses({ openGuess, results }: { openGuess: State['openGuess']; results: LastResult[] }) {
+  // The open guess counts towards the cards shown, so it pushes the oldest result off.
+  const shown = openGuess ? results.slice(0, RESULTS_SHOWN - 1) : results;
+  const count = shown.length + (openGuess ? 1 : 0);
+  if (!count) return null;
+  return (
+    <>
+      {openGuess && <OpenGuess {...openGuess} />}
+      {shown.map((result) => (
+        <GuessResult key={result.guessedAt} {...result} />
+      ))}
+      <p className="text-sm text-muted-foreground">
+        Showing last {count} {count === 1 ? 'guess' : 'guesses'}
+      </p>
+    </>
+  );
+}
+
+function OpenGuess({ direction, entryPrice, guessedAt }: NonNullable<State['openGuess']>) {
+  // Re-rendered by every poll, so the countdown ticks once a second.
+  const left = secondsLeft(guessedAt, Date.now());
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>
+          You guessed <strong>{direction.toLowerCase()}</strong> from {usd.format(Number(entryPrice))}
+        </CardTitle>
+        <CardDescription>
+          {left ? `Resolving guess in ${left} ${left === 1 ? 'second' : 'seconds'}` : 'Waiting for the price to move'}
+        </CardDescription>
+      </CardHeader>
+    </Card>
+  );
+}
+
+function GuessResult({ direction, entryPrice, resolvedPrice, guessedAt, delta }: LastResult) {
+  const rows = [
+    ['Your guess', direction === 'UP' ? 'Up' : 'Down'],
+    ['Entry price', usd.format(Number(entryPrice))],
+    ['Final price', usd.format(Number(resolvedPrice))],
+    ['Difference', signedUsd.format(Number(resolvedPrice) - Number(entryPrice))],
+  ];
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Guess at {clock.format(Date.parse(guessedAt))}</CardTitle>
+        <CardAction>
+          <Badge variant="outline" className={TRENDS[delta].className}>
+            {delta > 0 ? <Check /> : <X />}
+            {delta > 0 ? '+1' : '-1'}
+          </Badge>
+        </CardAction>
+      </CardHeader>
+      <CardContent>
+        <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
+          {rows.map(([label, value]) => (
+            <Fragment key={label}>
+              <dt className="text-muted-foreground">{label}</dt>
+              <dd className="text-right">{value}</dd>
+            </Fragment>
+          ))}
+        </dl>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -150,15 +261,21 @@ function GuessButtons({ state: { price, openGuess }, onGuessed }: { state: State
 
   return (
     <>
-      <p className="guess">
-        <button disabled={disabled} onClick={() => guess('UP')}>
+      <div className="grid grid-cols-2 gap-2">
+        <Button size="lg" disabled={disabled} onClick={() => guess('UP')}>
+          {openGuess?.direction === 'UP' ? <Check data-icon="inline-start" /> : <ArrowUp data-icon="inline-start" />}
           Up
-        </button>
-        <button disabled={disabled} onClick={() => guess('DOWN')}>
+        </Button>
+        <Button size="lg" disabled={disabled} onClick={() => guess('DOWN')}>
+          {openGuess?.direction === 'DOWN' ? <Check data-icon="inline-start" /> : <ArrowDown data-icon="inline-start" />}
           Down
-        </button>
-      </p>
-      {message && <p role="alert">{message}</p>}
+        </Button>
+      </div>
+      {message && (
+        <p role="alert" className="text-sm text-destructive">
+          {message}
+        </p>
+      )}
     </>
   );
 }
