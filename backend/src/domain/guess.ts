@@ -11,6 +11,7 @@ export interface LastResult {
 
 // A guess can resolve once this long has passed since it was made.
 export const RESOLVE_AFTER_MS = 60_000;
+const BACKUP_AFTER_MS = 120_000;
 
 export function isValidDirection(direction: unknown): direction is Direction {
   return direction === 'UP' || direction === 'DOWN';
@@ -24,7 +25,7 @@ export function scoreGuess(direction: Direction, entryPrice: string, price: stri
   return change > 0 === (direction === 'UP') ? 1 : -1;
 }
 
-// Guesses made at or before this time are due (D4).
-export function dueCutoff(now: Date): string {
-  return new Date(now.getTime() - RESOLVE_AFTER_MS).toISOString();
+// GET /state resolves a guess still open this long after it was made, in case its message was lost (D5).
+export function isOverdue(guessedAt: string, now: Date): boolean {
+  return now.getTime() - Date.parse(guessedAt) > BACKUP_AFTER_MS;
 }

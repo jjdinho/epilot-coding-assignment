@@ -1,6 +1,6 @@
 # BTC Up/Down — Implementation Slices
 
-Status: 5 October 2026. Companion to [design.md](design.md). The design says what to build and why. This doc gives the build order, settles the design's open items (§8), and fills in details it leaves to implementation.
+Status: 5 October 2026, updated 6 October 2026: slice 5 replaces the poller of slices 1–3 with on-demand prices and delayed SQS messages. Companion to [design.md](design.md). The design says what to build and why. This doc gives the build order, settles the design's open items (§8), and fills in details it leaves to implementation.
 
 ## How to use this doc
 
@@ -17,7 +17,7 @@ Each slice lists its **Scope**, the **Tests first** to write before the code, an
 - The branch is deployed and `npm run smoke` passes against it.
 - Every check in the slice is done.
 
-For the UI checks, use a headless browser (Playwright through `npx` is fine). For the poller checks, read its CloudWatch logs. Keep one-off check scripts out of the repo; the smoke test is the only one that belongs there. If a check can't be done headless, say so in the PR and leave it for the owner. If the PR changes after review, redeploy and rerun the checks the change affects.
+For the UI checks, use a headless browser (Playwright through `npx` is fine). For the poller and resolver checks, read their CloudWatch logs. Keep one-off check scripts out of the repo; the smoke test is the only one that belongs there. If a check can't be done headless, say so in the PR and leave it for the owner. If the PR changes after review, redeploy and rerun the checks the change affects.
 
 ## Settled decisions (design §8)
 
@@ -29,7 +29,7 @@ For the UI checks, use a headless browser (Playwright through `npx` is fine). Fo
 | Hosting | S3 + CloudFront, private bucket with origin access control |
 | Region | `eu-north-1` |
 | Tests | Vitest unit tests for pure domain logic. One smoke test against the deployed API. No DynamoDB Local. Handlers stay thin and aren't unit-tested; the smoke test covers them. |
-| Tick cadence | One per second |
+| Price cadence | One per second (D2) |
 
 ## Repository layout
 
@@ -40,7 +40,7 @@ package.json      npm workspaces; root scripts below
 backend/
   src/domain/     pure functions: every rule that can be one lives here, with its tests
   src/api.ts      API Lambda: one handler for all routes, switching on event.routeKey
-  src/poller.ts   poller Lambda
+  src/poller.ts   poller Lambda (slices 1–4; slice 5 replaces it with src/resolver.ts)
 frontend/         Vite + React
 infra/            CDK app: one stack
 smoke/            smoke test against the deployed API
@@ -57,9 +57,9 @@ Root scripts:
 
 ## Conventions for every slice
 
-- **Table.** One table, on-demand billing, string partition key `pk`, no sort key. Key values: `<playerId>`, `PRICE#LATEST`, `ALIAS#<lowercase alias>` (§5).
+- **Table.** One table, on-demand billing, string partition key `pk`, no sort key. Key values: `<playerId>`, `PRICE#LATEST`, `ALIAS#<lowercase alias>` (§5). From slice 5, price items are keyed `PRICE#<observedAt>` instead of `PRICE#LATEST`.
 - **Expressions.** Use `ExpressionAttributeNames` (`#score`, `#price`, …) for every attribute in every expression. DynamoDB has hundreds of reserved words, and that error only shows up after deploy.
-- **Timestamps.** Always `new Date().toISOString()`. The `open-guesses` sort key is compared as a string, so every stored timestamp needs the same format. Mixing `…:33Z` and `…:33.000Z` breaks the comparison. The one exception is `exchangeTime`, stored as Coinbase sends it.
+- **Timestamps.** Always `new Date().toISOString()`. The `open-guesses` sort key is compared as a string, and from slice 5 price items are keyed by their timestamp, so every stored timestamp needs the same format. Mixing `…:33Z` and `…:33.000Z` breaks the comparison. The one exception is `exchangeTime`, stored as Coinbase sends it.
 - **Prices.** Stored and returned as the exchange's decimal strings. Compare them as numbers, never as strings: trades come back as `"86096.25000000"`, the ticker as `"86096.25"`. Format for display on the client.
 - **Errors.** JSON body `{ "error": "<CODE>" }`. §6 names two codes; the full set is:
 
@@ -72,12 +72,14 @@ Root scripts:
   | 409 | `PLAYER_EXISTS` | This ID already has a player |
   | 409 | `ALIAS_TAKEN` | Another player holds the alias |
   | 409 | `GUESS_OPEN` | The player already has an open guess |
-  | 503 | `PRICE_STALE` | Latest tick missing or older than 5 s (D8) |
+  | 503 | `PRICE_STALE` | Latest tick missing or older than 5 s (D8). Slices 2–4 only. |
+  | 400 | `INVALID_PRICE_OBSERVED_AT` | `priceObservedAt` isn't a timestamp in the server's format (D4). From slice 5. |
+  | 409 | `PRICE_EXPIRED` | No price recorded at `priceObservedAt`, or recorded more than 3 s ago (D4, D8). From slice 5. |
   | 502 | `HISTORY_UNAVAILABLE` | Coinbase trades unreachable (D11) |
 
 - **API URL in the frontend.** The stack writes `config.json` (`{ "apiUrl": "…" }`) into the site bucket with `BucketDeployment` and `Source.jsonData`, which resolves the URL at deploy time. The frontend fetches it on startup. The frontend build then doesn't depend on the deploy, and one `cdk deploy` is enough.
 - **CORS.** The HTTP API allows any origin, `GET` and `POST`, and the `Content-Type` and `X-Player-Id` headers. No cookies are involved (D6), so a wildcard origin is fine.
-- **Lambdas.** `NodejsFunction`, Node 22, ARM64. Poller at 192 MB (D10): at 128 MB it peaked at 113 MB, before slice 2 added the resolve step. Add `esbuild` as a dev dependency so bundling doesn't need Docker. Use the built-in `fetch` with a timeout (`AbortSignal.timeout`) for Coinbase calls.
+- **Lambdas.** `NodejsFunction`, Node 22, ARM64. Poller at 192 MB (D10): at 128 MB it peaked at 113 MB, before slice 2 added the resolve step. Slice 5 removes the poller and adds the resolver. Add `esbuild` as a dev dependency so bundling doesn't need Docker. Use the built-in `fetch` with a timeout (`AbortSignal.timeout`) for Coinbase calls.
 - **Stack environment.** Region `eu-north-1`, account from `CDK_DEFAULT_ACCOUNT`, no context lookups, so `cdk synth` runs without AWS credentials. Stack outputs: `SiteUrl` and `ApiUrl`.
 
 ## Slice 1 — Join and watch the price
@@ -228,7 +230,13 @@ Until slice 3 is deployed, the poller runs every minute around the clock, about 
 - [ ] On load, the chart already shows about a minute of prices.
 - [ ] Switch away for two minutes and come back. The chart refills with no gap.
 
-## Slice 5 — README and finish
+## Slice 5 — On-demand price and delayed resolution
+
+**Goal.** No poller and no schedule. The API fetches the price when a page asks for it, a guess's entry price is exactly the price on the player's screen, and each guess resolves from its own SQS message delayed 60 seconds (D2, D4, D5, D8, D10).
+
+The full spec, with scope, tests first and checks, is [spec-sqs-resolution.md](spec-sqs-resolution.md).
+
+## Slice 6 — README and finish
 
 **Goal.** A reviewer can understand, run and deploy the project from the README alone.
 
@@ -239,10 +247,12 @@ Until slice 3 is deployed, the poller runs every minute around the clock, about 
   - The architecture in a paragraph, linking to [design.md](design.md).
   - Local setup, tests, deploy, smoke test.
 - The trade-offs the design promises to state:
-  - Up to a second can pass between the displayed price and the recorded entry price (D4).
+  - A guess is honored against a price up to 3 seconds old, so a player watching a faster feed gets up to 3 seconds of hindsight (D4).
+  - If a resolve message were lost, the guess would resolve on the player's next visit, at that moment's price (D5).
   - The player ID is the only credential. Clearing storage or using a private window starts a new player at 0 (D6).
   - A cleared player's alias stays reserved (D9).
-  - The chart can show a price the server never recorded (D11).
+  - The chart can show a price the server never recorded (D11). The headline price can briefly step back when two API instances hold different prices (D2).
+  - Coinbase calls scale with open tabs and open guesses rather than being fixed at one per second. Fine at this traffic; at scale a shared price cache would be needed (D2, §10).
 - A short "what we didn't do" (§10).
 - Review the smoke test end to end. It runs with one command.
 - No new features.

@@ -1,6 +1,6 @@
 # BTC Up/Down — Design and Decisions
 
-Status: draft, 2 October 2026, updated 5 October 2026. Written before any code, to pin down what we agreed and why.
+Status: draft, 2 October 2026, updated 6 October 2026. Written before any code, to pin down what we agreed and why. On 6 October the background poller of slices 1–3 was replaced: the API now fetches the price on demand, and each guess resolves from its own delayed SQS message (D2, D4, D5, D8, D10). The build is specified in [spec-sqs-resolution.md](spec-sqs-resolution.md).
 
 ## 1. The brief, condensed
 
@@ -19,33 +19,33 @@ The two clauses in bold drive most of the design.
 ## 2. Architecture at a glance
 
 ```
- Browser ──── GET /state (poll, every second) ───▶ API Lambda ────▶ DynamoDB
-    │                                                                   ▲
-    └──────── POST /player, POST /guess ─────────▶ API Lambda ──────────┤
-                                                       │                │
-                   starts the poller if price is stale │                │
-                                                       ▼                │
- EventBridge (every minute) ──▶ Poller Lambda (loops ~70 s, 1 tick/s) ──┘
-                                        │
-                                        └──▶ Coinbase Exchange public ticker (BTC-USD)
+ Browser ── GET /state (every second) ──────┬──▶ API Lambda ──▶ Coinbase ticker
+            POST /player, POST /guess ──────┘       │    │       (at most once a second per instance)
+                                                    │    │
+                                                    │    └──▶ DynamoDB ◀─────────────┐
+                        POST /guess sends a message │                                │
+                                     delayed 60 s   ▼                                │
+                                                SQS queue ──▶ Resolver Lambda ───────┘
+                                                    ▲               │
+                                                    └── re-sent ────┤ after 2 s: price unchanged
+                                                                    │ after 10 s: Coinbase down
+                                                                    └──▶ Coinbase ticker
 
- Browser ──── GET /price/history (on load, on tab return) ───▶ API Lambda
-                                                                   │
-                      Coinbase Exchange public trades (BTC-USD) ◀──┘
+ Browser ── GET /price/history (on load, on tab return) ──▶ API Lambda ──▶ Coinbase trades
 ```
 
-Three pieces: a static frontend, a small HTTP API, and one background poller. No per-user processes, no WebSockets, nothing that scales with player count except rows in a table. The poller only runs while someone is using the app (D10). For the price chart's history, the API fetches recent trades from Coinbase on request (D11).
+Four pieces: a static frontend, a small HTTP API, a queue, and a resolver Lambda. No scheduled jobs, no per-user processes, no WebSockets. The API fetches the price when a page asks for it (D2). Each guess resolves when its own delayed message arrives (D5). Nothing runs while nobody is playing (D10). For the price chart's history, the API fetches recent trades from Coinbase on request (D11).
 
 ## 3. Guess lifecycle
 
 1. On first visit, the client generates a player ID and asks for an alias. It sends `POST /player { alias }` and the server creates the player at score 0 (see D9).
-2. Client polls `GET /state` every second while its tab is visible and renders price, score, and the open guess if any. Each poll counts as a visit, which keeps the poller running (D10). On load, and when the tab becomes visible again, it also calls `GET /price/history` to fill the price chart with the last minute (D11).
-3. Player taps Up or Down. Client sends `POST /guess { direction }`.
-4. Server rejects with 409 if the player already has an open guess, or 503 if the latest tick is stale (see D8). Otherwise it records `direction`, `entryPrice` = the latest tick the server holds, and `guessedAt` = server time. Conditional write: fails if a guess appeared in between.
-5. Poller, on every tick: fetch price, store it as the latest, then look up open guesses with `guessedAt ≤ now − 60 s`. For each one where `tick.price ≠ entryPrice`: apply ±1 to score, clear the guess, store the resolving price and time. Conditional on the guess still being open with the `guessedAt` the query returned (see §5).
+2. Client polls `GET /state` every second while its tab is visible and renders price, score, and the open guess if any. The API fetches the price from Coinbase at most once a second per Lambda instance and records every price it fetches (D2). On load, and when the tab becomes visible again, the client also calls `GET /price/history` to fill the price chart with the last minute (D11).
+3. Player taps Up or Down. Client sends `POST /guess { direction, priceObservedAt }`, naming the price on screen by its `observedAt` time.
+4. Server rejects with 409 `PRICE_EXPIRED` unless it recorded that price in the last 3 seconds (D4, D8), and with 409 `GUESS_OPEN` if the player already has a guess open. Both checks come before anything is sent. Otherwise it sends a resolve message with a 60-second delay, then records `direction`, `entryPrice` = that price, and `guessedAt` = server time. Conditional write: fails with 409 if a guess was opened meanwhile (D5).
+5. When the message arrives, the resolver fetches the price. If it differs from `entryPrice`: apply ±1 to score, clear the guess, store the resolving price and time. Conditional on the guess still being open with the message's `guessedAt` (see §5). If the price hasn't changed, it sends the message again with a 2-second delay. If Coinbase can't be reached, with a 10-second delay (D5).
 6. Client's next poll shows the updated score and no open guess. The lock lifts.
 
-The player sees a countdown derived from the server's `guessedAt`, so it survives reloads and new tabs. After 60 seconds with no price change, the UI shows "waiting for the price to move".
+The player sees a countdown derived from the server's `guessedAt`, so it survives reloads and new tabs. After 60 seconds with no price change, the UI shows "waiting for the price to move". If a guess is somehow still open 2 minutes after it was made, `GET /state` resolves it (D5).
 
 ## 4. Decisions
 
@@ -55,15 +55,28 @@ The player sees a countdown derived from the server's `guessedAt`, so it survive
 
 **Why.** The brief says "60 seconds since the guess was made". A shared round would resolve a guess cast with one second left after one second. It also has a fairness hole: if the round compares round-start to round-end price, a player voting at second 59 has already watched 59 seconds of movement. Fixing that means comparing against the price at guess time, which is per-guess resolution anyway.
 
-### D2. One global price poller, roughly one tick per second
+### D2. The API fetches the price on demand
 
-**Decision.** A single scheduled job polls the price API and writes the latest tick. Everyone reads from that.
+**Decision.** No background poller. When a request needs the price, the API Lambda fetches the Coinbase ticker and reuses the result for 1 second within the same Lambda instance. Every price it fetches is recorded, so a guess can name it (D4).
 
-**Why.** Price fetching does not need to scale with users. One poller at 1 req/s is a fraction of any exchange's public limit. Polling once a minute would be too coarse: the displayed price would go stale and resolution could lag nearly two minutes.
+**Why.** Price fetching follows use. With nobody visiting, nothing fetches (D10). Coinbase sees at most one call per second per warm API instance, however many tabs poll. At this traffic that's a handful of instances, well under the 10 req/s limit (D3).
 
-**Mechanics.** EventBridge's floor is one minute, so the poller Lambda is invoked each minute and loops internally: fetch, write, resolve, sleep one second, for about 70 seconds. Runs overlap by about 10 seconds on purpose. EventBridge can start a scheduled target several seconds late, so a run that stopped at or before the minute would leave a gap each minute with no ticks. The displayed price would go stale and due guesses would wait. During the overlap two runs tick side by side, about 2 req/s, still well under the limit (D3). Conditional writes make the duplicate resolve attempts harmless.
+**Mechanics.**
 
-Runs only happen while the app is in use, and the API can start one early (D10). The poller logs resolutions, errors, and when polling starts or stops. It doesn't log individual ticks.
+- **Cache.** A variable in the API Lambda's module scope holds the last fetched price and the time of the last attempt. A Lambda instance handles one request at a time, so there's nothing to lock. Coinbase is tried at most once a second per instance, counted from the last attempt whether or not it succeeded. Between attempts, requests get the cached price.
+- **Record.** After each fetch, the API writes the price as its own item, keyed by its `observedAt` time (§5), and waits for the write before responding. A guess can then name that price straight away.
+- **Failure.** If Coinbase can't be reached, the API returns the cached price with its age, which soon makes it stale (D8), and doesn't try again for a second. A new instance with nothing cached returns `price: null`.
+- **Polls don't overlap.** The client skips a poll while the previous one is in flight. A slow Coinbase then slows each tab's polling to match, instead of stacking requests that spread across API instances, each fetching for itself.
+
+**Accepted consequences.** Two API instances can hold prices fetched at slightly different moments. One poll can then return a price up to a second older than the poll before. The chart ignores older prices (D11), but the headline price can briefly step back. A guess against either price is honored (D4).
+
+Coinbase calls also scale with use rather than being fixed at one per second: one per second per warm API instance, plus one per open guess per check (D5). At this traffic that's a few calls a second at most, about what the poller made. At scale a shared price cache would be needed (§10). This will be stated in the README.
+
+**Rejected alternatives.**
+
+- **A background poller on a schedule.** This was the first design, built in slices 1–3. EventBridge can't schedule more often than once a minute, so each run looped for about 70 seconds, fetching once a second. Keeping it idle when nobody played needed visit tracking, start requests from the API, and overlapping runs. Fetching on request needs none of that.
+- **A shared latest-price item in DynamoDB.** Every instance would show the same price. But every poll would add a database read, and concurrent refreshes would race.
+- **The browser fetching from Coinbase.** The server couldn't tell which price the player saw (D4). See also D11.
 
 ### D3. Price source: Coinbase Exchange public ticker
 
@@ -71,28 +84,61 @@ Runs only happen while the app is in use, and the API can start one early (D10).
 
 **Why.** True BTC/USD pair. Documented limit of 10 req/s per IP (bursts to 15). Answered in ~40 ms when probed. Response includes the exchange's own trade timestamp, which we store alongside our observation time so the audit trail does not rest on our clock alone.
 
+Coinbase serves the ticker through Cloudflare, which caches it for up to 1 second (`max-age=1`, checked 6 October 2026). So the price can be up to a second older than our `observedAt`, whatever we do. Cached responses don't seem to count against the rate limit: 25 simultaneous cached requests from one IP all succeeded, while 7 of 25 uncached ones were refused with 429.
+
 **Alternatives probed.**
 
 | API | Verdict |
 |---|---|
 | Bitstamp `ticker/btcusd` | Good fallback. BTC/USD, ~16 req/s allowed. |
 | Kraken `public/Ticker` | Works, but public limit is roughly 1 req/s. Tight. |
-| Binance `ticker/price` | Rejected. BTC/USDT not USD, and geo-blocks US IP ranges (HTTP 451), which would bite a poller in a US region. |
+| Binance `ticker/price` | Rejected. BTC/USDT not USD, and geo-blocks US IP ranges (HTTP 451), which would bite a Lambda in a US region. |
 | CoinGecko free tier | Rejected. 5–15 req/min. |
 
-### D4. The server picks both prices; the client is never trusted
+### D4. The entry price is the price the player saw; the server picks the resolution price
 
-**Decision.** Entry price is the latest tick the server holds when the guess arrives. Resolution price is the first tick observed at or after `guessedAt + 60 s` whose price differs from entry. The client never sends a price.
+**Decision.** A guess names the price on the player's screen by its `observedAt` time. The server accepts it only if it recorded that price in the last 3 seconds (D2), and uses it as the entry price. The resolution price is the first price the resolver fetches, at least 60 seconds after the guess, that differs from the entry price (D5). The client never sends a price value.
 
-**Why.** This is what "resolved fairly" means in practice. There may be up to a second between the number on the player's screen and the entry price recorded. That is accepted and will be stated in the README.
+**Why.** "Resolved fairly" needs two things. First, the client can't choose a price: it can only name one the server fetched from Coinbase and recorded. Second, the price that counts is the one the player saw: the entry price matches the screen exactly. In the first design the server took the latest price it held when the guess arrived, which could differ from the screen by up to a second.
 
-### D5. Resolution runs in the poller, not when the client reads
+**Why 3 seconds.** A price can be up to 1 second old when served (D2). The client shows it until the next poll, about a second later. Network time comes on top.
 
-**Decision.** The poller resolves eligible guesses on every tick. The API never resolves guesses. `GET /state` reads game state, and its only writes are the visit marker and poller start in D10.
+**Validation.** `priceObservedAt` must be an ISO timestamp in exactly the format the server writes, `new Date().toISOString()`. Anything else gets a 400 before DynamoDB is touched. As with the player ID (D6), a client then can't use it to read any item but a price.
 
-**Why.** Resolution then happens within a second or two of eligibility regardless of whether the player is online, because an open guess keeps the poller running (D10). That directly satisfies the optional "close the browser and return" requirement: the score is already updated when they come back. It also keeps the fairness story simple: the server decided at the first qualifying tick, with no client involvement.
+**Accepted consequence.** Honoring a price from the past gives the player up to 3 seconds of hindsight. A player watching a faster feed elsewhere could see a move, then guess against the older price on our screen. A shorter window means less hindsight, but more honest guesses refused as expired. This will be stated in the README.
 
-**Rejected alternative.** Resolve lazily on `GET /state` against a stored tick history. Deterministic in principle, but it needs tick retention long enough to cover any absence, and a player returning after retention expired could not be resolved honestly. The poller approach needs no tick history. The entry and resolution price/time stored on the guess record are the audit trail.
+**Rejected alternatives.**
+
+- **The latest price when the guess arrives.** No hindsight beyond Coinbase's own caching (D3), but the entry price could differ from the screen. That was the first design.
+- **The client sends the price value.** Anyone could send any price.
+- **A signed price.** The server signs each price it returns, and the guess sends it back. No storage needed, but a signing secret to create, store and rotate. A recorded price is simpler, and the records double as an audit trail of what players were shown.
+
+### D5. Each guess resolves from its own delayed message
+
+**Decision.** `POST /guess` sends an SQS message with a 60-second delay. A resolver Lambda receives it, fetches the price, and resolves the guess if the price differs from the entry price. If the price hasn't changed, it sends the message again with a 2-second delay. If Coinbase can't be reached, with a 10-second delay.
+
+**Why.** Each guess resolves on time whether or not the player is online. That satisfies the optional "close the browser and return" requirement: the score is already updated when they come back. Nothing runs between guesses, and no sweep or index is needed to find due guesses. The message carries everything the resolver needs.
+
+**Mechanics.**
+
+- **Message.** `{ playerId, direction, entryPrice, guessedAt }`. A standard queue: FIFO queues can't delay individual messages. SQS never delivers a delayed message early, so a guess can't resolve before 60 seconds.
+- **Check, send, then save.** `POST /guess` reads the player first and refuses, before sending anything, if there's no player or a guess is already open. A refused guess then costs no message, no resolver run and no Coinbase call. Otherwise it sends the message, then saves the guess. If the send fails, nothing is saved and the player can try again. The save can still fail when two tabs guess at the same moment. The loser's message then arrives for a guess with a different `guessedAt`: the resolver fetches a price, and once that differs from the message's entry price, the conditional write fails and the message is done.
+- **One message per invocation.** Batch size 1. The resolver fetches the price, then resolves the guess, re-sends the message, or stops.
+- **Two re-send delays.** 2 seconds when the price hasn't moved, so a guess resolves soon after it does. 10 seconds when Coinbase can't be reached: during an outage every open guess is retrying, and a 2-second cadence would mean a Coinbase call every 2 seconds per open guess. The cost is that a guess can resolve up to 10 seconds after Coinbase recovers.
+- **Resolve.** One conditional write, as in the first design: add ±1 to the score, store the last result, clear the guess. The condition is that the player has an open guess with the message's `guessedAt` (§5). A failed condition means the guess was already resolved or never saved, and the message is done.
+- **Never dropped unresolved.** The resolver returns normally, which lets SQS delete the message, only after resolving the guess, finding it gone, or re-sending the message. Any other error throws, and SQS delivers the message again after its visibility timeout.
+- **Duplicates.** SQS can deliver a message twice, and re-sends can overlap. The conditional write turns every extra attempt into a no-op.
+- **Logs.** The resolver logs each resolution with the player's alias, not their ID (D6), and errors. It doesn't log re-sends.
+
+**Backup.** If a guess is still open 2 minutes after it was made, `GET /state` resolves it with the price it's about to return, unless that price is stale (D8). It uses the same conditional write. With the mechanics above, a message shouldn't be lost. But a lost message would otherwise lock the player out for good, and the backup is a few lines. Concurrent with a late message, the conditional write lets exactly one resolve.
+
+**Accepted consequence.** If a message were lost, the guess would resolve the next time the player visits, at that moment's price, not on time.
+
+**Rejected alternatives.**
+
+- **A background poller sweeping open guesses.** The first design, built in slices 2–3: the poller from D2 queried an index of open guesses every second and resolved the due ones. It needed the poller running whenever any guess was open, wherever the player was. Delayed messages do the same job with nothing running in between.
+- **Resolving lazily on `GET /state`, as the main mechanism.** A losing player could stay away until the price turned in their favor, then come back to resolve. As a backup it can't be gamed that way: it only acts when a message is lost, and the player can't cause that.
+- **A dead-letter queue.** See §10.
 
 ### D6. Anonymous player identity: client-generated ID in local storage
 
@@ -100,7 +146,7 @@ Runs only happen while the app is in use, and the API can start one early (D10).
 
 **Why.** The brief does not ask for authentication (see §10). This is enough to make the lock hold across tabs and reloads in the same browser. Chosen over a server-set cookie because the frontend and API will likely live on different origins, and cross-origin cookies are fragile (SameSite rules, Safari third-party blocking).
 
-**Validation.** The server accepts `X-Player-Id` only as a canonical lowercase UUID v4, the format `crypto.randomUUID()` produces. Anything else gets a 400 before DynamoDB is touched. This stops clients choosing guessable IDs like `1`. It also guarantees a player key can never collide with the table's other keys, `PRICE#LATEST` and `ALIAS#…`. Without the check, a client sending `X-Player-Id: PRICE#LATEST` could write guess attributes onto the price item.
+**Validation.** The server accepts `X-Player-Id` only as a canonical lowercase UUID v4, the format `crypto.randomUUID()` produces. Anything else gets a 400 before DynamoDB is touched. This stops clients choosing guessable IDs like `1`. It also guarantees a player key can never collide with the table's other keys, `PRICE#…` and `ALIAS#…`. Without the check, a client sending `X-Player-Id: PRICE#…` could write guess attributes onto a price item.
 
 **Accepted consequence.** Clearing storage or opening an incognito window yields a fresh player at 0. The ID works like a password: anyone who holds it plays as that player. It can't be guessed, but it could leak, so the UI never displays it and shows the alias instead (D9). This will be stated in the README.
 
@@ -110,11 +156,11 @@ Runs only happen while the app is in use, and the API can start one early (D10).
 
 **Why.** The brief says "loses 1 point" with no floor. Taking it literally is the least surprising reading and the simplest.
 
-### D8. Refuse guesses when the price feed is stale
+### D8. A price is stale after 3 seconds
 
-**Decision.** If the latest tick is older than 5 seconds, `POST /guess` returns 503 and the UI disables the buttons with a "price feed unavailable" notice. Open guesses simply wait; they resolve when ticks resume.
+**Decision.** A price more than 3 seconds old is stale. `GET /state` marks it `stale`, and the UI disables the guess buttons with a "price feed unavailable" notice. `POST /guess` refuses it with 409 `PRICE_EXPIRED` (D4). Open guesses simply wait: the resolver keeps re-checking every 10 seconds until Coinbase answers (D5).
 
-**Why.** Accepting a guess against a stale entry price is unfair in both directions. A player watching the live price elsewhere could guess with several seconds of hindsight. Five seconds still leaves room for a slow upstream call at a one-second cadence. The cutoff matters because the poller stops when idle (D10). A visitor arriving just after it stops sees a price that is a few seconds old, and this rule caps how old a price they can guess against.
+**Why.** It's the same 3 seconds as D4. Buttons shouldn't be enabled for a price the server won't accept. While Coinbase answers, every price the API serves is under a second old (D2). So a stale price means the API couldn't reach Coinbase.
 
 ### D9. Players choose a unique alias, shown instead of the ID
 
@@ -128,54 +174,46 @@ Runs only happen while the app is in use, and the API can start one early (D10).
 
 **Accepted consequence.** A player who clears storage loses their player record and can't reclaim their alias. It stays reserved to the abandoned record. Without authentication, the server has no way to tell that the returning player is the same person.
 
-### D10. The poller runs only while the app is in use
+### D10. Nothing runs while nobody is playing
 
-**Decision.** The poller runs while someone has visited in the last 30 seconds or any guess is open. Otherwise nothing polls Coinbase or writes to DynamoDB.
+**Decision.** No scheduled jobs. The API fetches the price only when a page asks for it (D2). An open guess's message is the only thing that runs while nobody is watching (D5). A hidden tab stops polling.
 
-**Why.** Nothing should run when nobody is using the app. Polling around the clock costs about $2.20 a month in DynamoDB writes and queries, plus about $7.50 in Lambda time (192 MB on ARM) once the free allowance is used up, whether or not anyone plays. On demand, an idle month costs about 2 cents for the per-minute checks. An hour of play costs about 1 cent, plus under a cent per open tab. (Stockholm on-demand prices, October 2026.) The saving is a few dollars a month, but it's how we'd want a real service to behave, and the extra pieces are small.
+**Why.** Nothing should run when nobody is using the app. Idle, the only cost is Lambda polling the queue for messages. SQS bills those polls as requests, but at this size that's within its free allowance or a few cents a month. The first design needed visit tracking, poller starts and an idle check to get close to this. Here it follows from fetching on request and resolving from messages.
 
-**Why open guesses count.** If visitors alone kept the poller running, a player losing at second 50 could close the tab. The poller would stop, and the guess would wait until someone next visits and resolve at whatever the price is then. A near-certain loss becomes a coin flip. Keeping the poller running while any guess is open means every guess resolves at its first qualifying tick (D4), whether or not anyone is watching.
+**Why hidden tabs stop.** A forgotten background tab would otherwise make the API fetch a price every second that nobody sees. When the tab becomes visible again, polling resumes and the chart reloads its history (D11).
 
-**Mechanics.**
-
-- **Visits.** Each `GET /state` counts as a visit. The API writes `lastVisitAt` on the price item when the stored value is more than 10 seconds old, so all open tabs together cause at most one write every 10 seconds. The client stops polling while its tab is hidden, so a forgotten background tab doesn't keep the poller running.
-- **Start.** If `GET /state` finds the price more than 3 seconds old, it treats the poller as stopped. The API records the visit, then invokes the poller Lambda asynchronously so the request doesn't wait. A conditional write on `startRequestedAt` allows one start per 70 seconds, the length of a run. That stops many tabs from each starting a poller. It also stops a Coinbase outage, which makes the price stale too, from piling up runs. The first fresh tick arrives about 1–2 seconds after the visit.
-- **Stop.** The minute rule from D2 keeps firing. Each run first checks for a visit in the last 30 seconds or an open guess, using a one-item query on the `open-guesses` index. If it finds neither, it exits within milliseconds. Otherwise it loops for its usual ~70 seconds. So polling stops one to two minutes after the last visitor leaves and the last guess resolves.
-
-**Accepted consequence.** The first visitor after an idle period briefly sees an old price. The UI shows its age and keeps the guess buttons disabled until the first fresh tick arrives (D8).
-
-**Rejected alternative.** A poller that manages its own lifetime: a lease so only one runs at a time, and a restart of itself before Lambda's 15-minute limit. More code and more ways to fail. The minute rule also replaces a crashed run, which a self-managing poller would need its own safety net for.
+**Accepted consequence.** The first request to a cold API instance waits for a Coinbase call, about a second including the Lambda cold start.
 
 ### D11. The price chart's history comes from Coinbase, through our API
 
 **Decision.** The page shows a live chart of the last 60 seconds of BTC/USD. On load, and whenever a hidden tab becomes visible again, the client calls `GET /price/history`. The API fetches recent trades from Coinbase and returns one price per second for the last minute. After that, each `GET /state` poll adds the server's latest price.
 
-**Why.** We have no history of our own. The poller stops when nobody is using the app (D10), so the first visitor after a quiet spell would find nothing stored. Coinbase keeps recent trades, so the API can fetch them on request. Nothing new runs while the app is idle, and nothing new is stored.
+**Why.** We have no usable history of our own. The API records prices only while someone is visiting (D2, D10), so the first visitor after a quiet spell would find nothing recent stored. Coinbase keeps recent trades, so the API can fetch them on request. Nothing new runs while the app is idle, and nothing new is stored.
 
 **Why through our API.** The browser talks only to our own frontend and API, so Coinbase never sees players' IP addresses. The price source stays a server detail: switching to the Bitstamp fallback (D3) wouldn't touch the client. And the client receives about 60 points instead of 1,000 raw trades.
 
 **Mechanics.**
 
 - **Upstream request.** `GET https://api.exchange.coinbase.com/products/BTC-USD/trades?limit=1000`. No API key. When probed on 5 October 2026, 1,000 trades covered four to six minutes, so one request covers the minute with room to spare. No paging.
-- **Same series as the live price.** Our ticks are Coinbase's last trade price, sampled once a second (D3). The API reduces the trades to the last trade in each second, so the chart has one point per second on both sides of the join.
-- **No storage.** The endpoint doesn't touch DynamoDB. The `GET /state` poll that starts at the same moment records the visit (D10).
-- **Joining live prices.** The client adds a polled price only if its `observedAt` is newer than the chart's newest point. That drops duplicates, and the old price a visitor sees while the poller starts up (D10).
+- **Same series as the live price.** Our live prices are Coinbase's last trade price, sampled at most once a second (D2, D3). The API reduces the trades to the last trade in each second, so the chart has one point per second on both sides of the join.
+- **No storage.** The endpoint doesn't touch DynamoDB.
+- **Joining live prices.** The client adds a polled price only if its `observedAt` is newer than the chart's newest point. That drops duplicates, and an older price from another API instance (D2).
 - **Window.** The client keeps the 60 seconds up to the chart's newest point. Anchoring on the data rather than the device clock means a wrong clock can't empty the chart.
 - **Tab return.** Hidden tabs stop polling (D10), which leaves a gap in the chart. When the tab becomes visible, the client requests the history again, replaces the chart's points, and resumes polling.
-- **Poll rate.** The client polls `GET /state` every second to match the tick rate. Polling every two seconds would make the live end of the chart half as dense as the history.
+- **Poll rate.** The client polls `GET /state` every second to match the API's price cache (D2). Polling every two seconds would make the live end of the chart half as dense as the history.
 
-**Display only.** The history plays no part in resolution. The server still picks both prices from its own ticks (D4).
+**Display only.** The history plays no part in guessing or resolution. A guess can only name a price the API recorded, and the resolver fetches its own (D4).
 
 **Accepted consequences.**
 
-- The history takes the last trade in each second, while the poller samples partway through a second. So the chart can show a price the server never recorded. After a reload or tab return, that can fall within an open guess. The guess panel shows the server's entry and resolution prices, which are the ones that count.
+- The history takes the last trade in each second, while the API samples partway through a second. So the chart can show a price the server never recorded. After a reload or tab return, that can fall within an open guess. The guess panel shows the server's entry and resolution prices, which are the ones that count.
 - If Coinbase can't be reached, or a very busy minute has more than 1,000 trades, the chart starts partly empty and fills from polls within a minute. Guessing is unaffected.
-- Every page load and tab return makes one Coinbase call from AWS, alongside the poller's. Coinbase's public limit is 10 req/s per IP, plenty at this traffic. At scale, the API would cache the result for a second so all page loads in that second share one call.
+- Every page load and tab return makes one Coinbase call from AWS, alongside the price fetches (D2). Coinbase's public limit is 10 req/s per IP, plenty at this traffic. At scale, the API would cache the result for a second so all page loads in that second share one call.
 
 **Rejected alternatives.**
 
-- **Browser calls Coinbase directly.** Coinbase allows cross-origin requests, and it would save a Lambda call. But every player's browser would contact a third party, and the client would depend on Coinbase's API shape and cross-origin policy.
-- **Store recent ticks ourselves.** One item per tick with a short expiry, and an endpoint returning the last 60. Nothing is stored while the app is idle (D10), so the first visitor after a quiet spell would still see an empty chart.
+- **Browser calls Coinbase directly.** Coinbase allows cross-origin requests, and it would save a Lambda call. But every player's browser would contact a third party, and the client would depend on Coinbase's API shape and cross-origin policy. Coinbase's limit is per IP, so players sharing one network would also share it. For the live price, the server couldn't tell which price a player saw (D4).
+- **Serve the recorded prices.** The API already records every price it fetches (D2), so an endpoint could return the last 60 seconds of them. But nothing is recorded while the app is idle (D10), so the first visitor after a quiet spell would still see an empty chart.
 - **Coinbase candles.** The smallest bucket is 60 seconds, so the whole minute would be a single point.
 - **No history.** The chart fills from polls alone, so it's empty for the first minute after every load and tab return.
 
@@ -191,21 +229,19 @@ One table, three item types.
 | `score` | Signed integer |
 | `guessDirection` | `UP` or `DOWN`, present only while a guess is open |
 | `guessEntryPrice` | Decimal as string, present only while open |
-| `guessedAt` | ISO timestamp, present only while open |
-| `guessStatus` | Constant `OPEN`, present only while open. Sparse GSI key. |
+| `guessedAt` | ISO timestamp, present only while open. Its presence is what makes a guess open. |
 | `lastResult` | `{ direction, entryPrice, resolvedPrice, guessedAt, resolvedAt, delta }` from the most recent resolved guess, for display |
 
-**Latest price item**, fixed key `PRICE#LATEST`.
+**Price item**, keyed `PRICE#<observedAt>`. One per price the API fetches (D2), so a guess can name it (D4).
 
 | Attribute | Notes |
 |---|---|
 | `price` | Decimal as string, as returned by the exchange |
 | `exchangeTime` | Trade timestamp from the Coinbase response |
-| `observedAt` | Our server time when fetched |
-| `lastVisitAt` | Written by the API at most every 10 s. Keeps the poller running (D10) |
-| `startRequestedAt` | Written by the API when it starts the poller. Allows one start per 70 s (D10) |
+| `observedAt` | Our server time when fetched, the same as in the key |
+| `expiresAt` | `observedAt` plus 1 hour, in epoch seconds. The table's TTL attribute. |
 
-The poller writes ticks with `UpdateItem`, setting only the price attributes, so it doesn't erase the two the API writes.
+DynamoDB deletes expired items in the background, sometimes days late, so the 3-second window is enforced by checking `observedAt`, never by the item being gone. The hour keeps recent prices around for debugging. The guess itself stores its entry and resolution prices, so nothing depends on the price items after the guess is made.
 
 **Alias item**, keyed `ALIAS#<lowercase alias>`. Exists only to make aliases unique (D9).
 
@@ -213,11 +249,11 @@ The poller writes ticks with `UpdateItem`, setting only the price attributes, so
 |---|---|
 | `playerId` | The player who holds the alias |
 
-**GSI `open-guesses`**: partition key `guessStatus`, sort key `guessedAt`. Sparse: only players with an open guess appear. The poller queries `guessStatus = OPEN AND guessedAt <= now − 60 s`. At the start of each run it also checks whether any guess is open at all (D10).
+All writes that change guess state are conditional on the current state, so duplicate messages, the `GET /state` backup and double-clicks cannot double-apply.
 
-All writes that change guess state are conditional on the current state, so overlapping poller invocations or double-clicks cannot double-apply.
+Opening a guess requires `attribute_not_exists(guessedAt)`. Resolving one requires `guessedAt` to equal the value in the message. Checking only that some guess is open isn't enough. A late or duplicate message for an earlier guess would then resolve the player's newer guess with the old guess's direction and entry price. Requiring the same `guessedAt` makes that write fail instead.
 
-The resolve write checks `guessedAt` as well as `guessStatus`. The GSI is updated asynchronously. That doesn't matter for finding due guesses, which are at least 60 seconds old, but for a moment after a resolve the index can still list the old guess. If the player opens a new guess in that moment, a check on `guessStatus = OPEN` alone would pass, and the poller would resolve the new guess with the old guess's direction and entry price. Requiring `guessedAt` to equal the value the query returned makes that write fail instead.
+The table has no secondary index. The resolver finds a guess by the player ID in its message.
 
 ## 6. API
 
@@ -234,7 +270,7 @@ Every endpoint requires the `X-Player-Id` header and returns 400 if it isn't a v
 
 ```json
 {
-  "price": { "value": "86024.74", "observedAt": "2026-10-02T14:48:33Z", "stale": false },
+  "price": { "value": "86024.74", "observedAt": "2026-10-02T14:48:33.120Z", "stale": false },
   "alias": "Satoshi",
   "score": 3,
   "openGuess": { "direction": "UP", "entryPrice": "86010.00", "guessedAt": "2026-10-02T14:47:50Z" },
@@ -242,14 +278,17 @@ Every endpoint requires the `X-Player-Id` header and returns 400 if it isn't a v
 }
 ```
 
-`openGuess` and `lastResult` are `null` when absent.
+`openGuess` and `lastResult` are `null` when absent. `price` is `null` when the API has no price at all: Coinbase couldn't be reached by a new API instance (D2). `stale` is true when the price is more than 3 seconds old (D8).
 
-**`POST /guess`** with body `{ "direction": "UP" | "DOWN" }`
+**`POST /guess`** with body `{ "direction": "UP" | "DOWN", "priceObservedAt": "2026-10-02T14:48:33.120Z" }`
+
+`priceObservedAt` is the `price.observedAt` of the price on screen, sent back exactly as received (D4).
 
 - 201 with the new state on success
-- 409 if a guess is already open
-- 503 if the price feed is stale
-- 400 on a bad direction
+- 409 `GUESS_OPEN` if a guess is already open
+- 409 `PRICE_EXPIRED` if the server didn't record that price, or recorded it more than 3 seconds ago
+- 400 `INVALID_DIRECTION` on a bad direction
+- 400 `INVALID_PRICE_OBSERVED_AT` if `priceObservedAt` isn't a timestamp in the server's format
 
 **`GET /price/history`**
 
@@ -268,20 +307,22 @@ The last 60 seconds, oldest first, one point per second: the last Coinbase trade
 
 ## 7. Edge cases, by name
 
-- **Price unchanged at 60 s.** Guess stays open until a differing tick. UI says so.
-- **Overlapping poller runs.** By design, for about 10 seconds each minute (D2), and for up to 70 seconds after the API starts one (D10). Conditional writes; at worst one run does a no-op.
-- **Stale index entry.** The resolve write requires a matching `guessedAt`, so a lagging index can't resolve a player's newer guess (§5).
-- **Feed down.** Price shown with its age, guess buttons disabled after 5 s of staleness, open guesses wait. The API starts at most one extra run per 70 s while the price is stale (D10).
-- **First visit after idle.** The poller starts within 1–2 s. Until its first tick, the price shows its age and guessing is disabled (D8, D10).
-- **Player leaves with a guess open.** The open guess keeps the poller running, so it resolves on time (D10).
-- **Forgotten background tab.** Hidden tabs stop polling, so they don't keep the poller running (D10).
+- **Price unchanged at 60 s.** The resolver re-sends the message and checks again every 2 seconds until the price differs. The UI says it's waiting for the price to move.
+- **Duplicate or late message.** From SQS delivering twice, overlapping re-sends, or a guess whose save failed. The resolve write requires a matching `guessedAt`, so at worst the attempt is a no-op (§5).
+- **Feed down.** Price shown with its age, guess buttons disabled once it's more than 3 s old, open guesses wait. The API tries Coinbase once a second per instance and otherwise answers from its cache (D2). The resolver keeps re-checking every 10 s (D5, D8).
+- **First visit after idle.** The API fetches a fresh price on the first request. Only a Lambda cold start adds a delay (D10).
+- **Player leaves with a guess open.** The message resolves it on time (D5).
+- **Message lost.** Shouldn't happen (D5). If it did, `GET /state` resolves the guess once it's 2 minutes old, the next time the player visits.
+- **Guess against an old price.** 409 `PRICE_EXPIRED`, for example after the tab froze. The next poll brings a fresh price (D4).
+- **Two API instances, two prices.** A poll can return a price up to a second older than the last. The chart ignores it, and a guess against either is honored (D2).
+- **Forgotten background tab.** Hidden tabs stop polling, so they don't make the API fetch prices nobody sees (D10).
 - **Tab becomes visible again.** The client requests the chart's history again, filling the gap left while polling was paused (D11).
 - **Coinbase trades unreachable.** `GET /price/history` returns 502. The chart starts empty and fills from polls. Guessing is unaffected (D11).
 - **Two tabs.** Same `X-Player-Id`, same lock, both show the same countdown.
-- **Double-click.** Second request hits the conditional write and gets 409.
+- **Double-click.** The second request finds the first guess open and gets 409 before sending anything. If both arrive at once, the conditional write refuses one, and its message later finds a guess with a different `guessedAt` (D5, §5).
 - **Cleared storage / incognito.** New player at 0, who must choose a new alias. The old alias stays reserved. Accepted, documented.
 - **Alias taken.** 409, and the UI asks for another. Two players claiming the same alias at once: the transaction lets exactly one through.
-- **Malformed player ID.** 400 before any database access.
+- **Malformed player ID or price time.** 400 before any database access.
 
 ## 8. Still open, to decide next
 
@@ -290,37 +331,30 @@ The last 60 seconds, oldest first, one point per second: the last Coinbase trade
 3. **Frontend hosting.** S3 + CloudFront, or Amplify Hosting. Either is fine; CloudFront can also front the API under one origin if we later want cookies.
 4. **Region.** Recommendation: `eu-north-1` (Stockholm). Coinbase works from the EU.
 5. **Testing scope.** Recommendation: unit tests for the pure domain logic (resolution rule, staleness, state transitions) and one end-to-end smoke test against the deployed API. No DynamoDB Local.
-6. **Tick cadence.** One per second is the plan. Two per second is within limits if the UI feels sluggish; one per two seconds if we want more headroom. Trivial to change, but the client's poll rate and the chart's per-second history points should change with it (D11).
+6. **Price cadence.** One price per second: the API's cache lifetime (D2). Two per second is within limits if the UI feels sluggish; one per two seconds if we want more headroom. Trivial to change, but the client's poll rate, the chart's per-second history points and the 3-second guess window should change with it (D4, D11).
 
 ## 9. Rejected along the way
 
 - **Shared one-minute rounds.** Breaks the "since the guess was made" clause and creates a late-vote exploit. See D1.
-- **Lazy resolution against tick history.** Retention hole for long absences, resolution tied to client presence. See D5.
+- **Lazy resolution on `GET /state`.** A losing player could choose when to come back. Kept only as a backup for a lost message. See D5.
 - **WebSocket price feed in a long-running container.** More moving parts than a half-day assignment warrants; polling at 1 Hz is indistinguishable to the player.
 - **Binance, CoinGecko.** See D3.
-- **Always-on poller.** Simplest, but runs and bills around the clock with nobody playing. See D10.
-- **Self-managing poller.** A lease plus self-restart before Lambda's 15-minute limit. More failure modes than the minute rule. See D10.
-- **Storing tick history for the chart.** The poller is idle when nobody plays, so there would be nothing to show the first visitor. See D11.
+- **Background poller on a one-minute schedule.** The first design, built in slices 1–3: one Lambda fetched the price every second and resolved due guesses from an index. Keeping it idle needed visit tracking, start requests and overlapping runs. Replaced by on-demand prices and delayed messages. See D2, D5, D10.
+- **Always-on poller.** Simpler than the first design, but runs and bills around the clock with nobody playing. See D10.
+- **Storing price history for the chart.** Prices are only recorded while someone plays, so there would be nothing to show the first visitor. See D11.
+- **Entry price from the latest price when the guess arrives.** Can differ from the price on screen. See D4.
 - **Browser fetching chart history from Coinbase directly.** Exposes players to a third party and ties the client to Coinbase's API. See D11.
 
 ## 10. What we didn't do
 
 ### Authentication
 
-**Why not.** The brief doesn't ask for it, and the game's fairness doesn't depend on it. The server picks both prices (D4) and holds the lock for each player, so a signed-in player couldn't do anything an anonymous one can't. What auth would add is continuity: the same player on another device, after clearing storage, or in a private window, with their alias intact. The cost is that every reviewer would have to sign up and confirm an email before seeing the game. Building the sign-up and sign-in flows, email verification, and a test user for the smoke test would also take a large share of the half-day budget.
+**Why not.** The brief doesn't ask for it, and the game's fairness doesn't depend on it. The server accepts only prices it recorded, picks the resolution price (D4), and holds the lock for each player, so a signed-in player couldn't do anything an anonymous one can't. What auth would add is continuity: the same player on another device, after clearing storage, or in a private window, with their alias intact. The cost is that every reviewer would have to sign up and confirm an email before seeing the game. Building the sign-up and sign-in flows, email verification, and a test user for the smoke test would also take a large share of the half-day budget.
 
 **How it would fit.** Add a Cognito user pool and attach API Gateway's built-in JWT authorizer to the HTTP API. The API then takes `playerId` from the token's `sub` claim instead of the `X-Player-Id` header. The data model, resolution logic, aliases and endpoints stay as they are. Existing anonymous players could keep their score and alias: on first sign-in the client sends its old ID once, and the server moves the player item to the new key and repoints the alias item, all in one transaction.
-
-### Per-guess delayed message (SQS)
-
-**What it is.** `POST /guess` would send an SQS message with a 60-second delay, and a Lambda would resolve the guess when the message arrives. No sweep and no open-guesses index.
-
-**Why not now.** The poller has to run anyway to keep the displayed price live, and it already checks for due guesses on every tick. A queue would be a second mechanism for the same job, with its own retry and failure handling. It also fits the brief's rule awkwardly. If the price hasn't moved at 60 seconds, the handler has to re-send the message and check again, which is a polling loop per guess.
-
-**When it would be worth it.** At a volume where one poller can't resolve every due guess within a tick, or the open-guesses index's single partition runs hot. Delayed messages spread resolution across parallel Lambda invocations, and SQS adds retries and a dead-letter queue for resolutions that fail.
 
 ### Smaller omissions
 
 - **Alias changes and moderation.** Aliases are fixed once chosen and not checked for offensive words. Without sign-up, a script could also reserve many aliases. API Gateway throttling would slow that down, but stopping it outright needs auth or a CAPTCHA.
-- **Sharding the open-guesses index.** Its partition key is a constant, which becomes a single hot partition at real scale. The standard fix is to spread the key across a few values and query them in parallel. Not needed at this traffic.
-- **Backup poller.** Nothing else fetches the price or resolves guesses if the poller stops. A crashed run is usually replaced within seconds, because `GET /state` starts a poller when the price goes stale (D10). At worst the next minute's run replaces it. Meanwhile the guess buttons disable after 5 seconds (D8) and open guesses wait. A poller that keeps failing stops the game until it's fixed. If we want a backup, `GET /state` can be it: when the latest tick is more than a few seconds old, the request fetches the price and runs the poller's resolve step itself. Conditional writes already make that safe alongside the poller. Only one request per second should do it, so a busy page doesn't call Coinbase once per open browser.
+- **Dead-letter queue.** A message that keeps failing for a reason other than Coinbase, such as a DynamoDB error, is delivered again every 30 seconds until SQS's retention period ends after 4 days. A dead-letter queue would set it aside for inspection after a few attempts. Without one, the `GET /state` backup still resolves the guess when the player returns (D5). Errors show in the resolver's logs either way.
+- **A shared price cache.** Each API instance caches its own price (D2). At real scale, many instances would each call Coinbase once a second, and many open guesses would each fetch at every check (D5). A shared cache, or one fetcher writing for everyone, would keep that to one call, and a concurrency cap on the resolver's event source would bound the resolver's share. Not needed at this traffic.

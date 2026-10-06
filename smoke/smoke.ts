@@ -24,8 +24,23 @@ const playerId = randomUUID();
 // Smoke aliases stay reserved for good, which is accepted (D9).
 const alias = `smoke_${randomBytes(4).toString('hex')}`;
 
+interface Price {
+  value: string;
+  observedAt: string;
+  stale: boolean;
+}
+
+// The price on the player's screen, which a guess names by its observedAt (D4).
+async function priceOnScreen(): Promise<Price> {
+  return (await call('GET', '/state', playerId)).body.price;
+}
+
 await check('Bad player ID → 400 INVALID_PLAYER_ID', async () => {
-  assert.deepEqual(await call('GET', '/state', 'PRICE#LATEST'), { status: 400, body: { error: 'INVALID_PLAYER_ID' } });
+  // A price item's key, which the check keeps clients from addressing (D6).
+  assert.deepEqual(await call('GET', '/state', 'PRICE#2026-10-02T14:48:33.120Z'), {
+    status: 400,
+    body: { error: 'INVALID_PLAYER_ID' },
+  });
 });
 
 await check('New player ID → GET /state 404', async () => {
@@ -60,22 +75,19 @@ await check('Same ID again → 409 PLAYER_EXISTS', async () => {
   assert.deepEqual(await call('POST', '/player', playerId, { alias }), { status: 409, body: { error: 'PLAYER_EXISTS' } });
 });
 
-await check('GET /state → the alias, score 0, a fresh price within 10 s', async () => {
-  // If the app was idle, this visit starts the poller, and its first tick takes a second or two (D10).
-  const giveUpAt = Date.now() + 10_000;
-  let { status, body } = await call('GET', '/state', playerId);
-  while (body.price?.stale !== false && Date.now() < giveUpAt) {
-    await sleep(500);
-    ({ status, body } = await call('GET', '/state', playerId));
-  }
+let firstPrice: Price;
+await check('GET /state → the alias, score 0, a fresh price on the first call', async () => {
+  const { status, body } = await call('GET', '/state', playerId);
   assert.equal(status, 200);
   assert.equal(body.alias, alias);
   assert.equal(body.score, 0);
   assert.equal(body.price?.stale, false);
+  firstPrice = body.price;
 });
 
 await check('Guess from an unknown player ID → 404 PLAYER_NOT_FOUND', async () => {
-  assert.deepEqual(await call('POST', '/guess', randomUUID(), { direction: 'UP' }), {
+  // An unknown player can't get a price of its own, so it names the real player's, while it's still fresh.
+  assert.deepEqual(await call('POST', '/guess', randomUUID(), { direction: 'UP', priceObservedAt: firstPrice.observedAt }), {
     status: 404,
     body: { error: 'PLAYER_NOT_FOUND' },
   });
@@ -88,34 +100,66 @@ await check('Bad direction → 400 INVALID_DIRECTION', async () => {
   });
 });
 
-await check('Guess → 201 with an open guess', async () => {
-  const { status, body } = await call('POST', '/guess', playerId, { direction: 'UP' });
+await check('Missing priceObservedAt, or one without milliseconds → 400 INVALID_PRICE_OBSERVED_AT', async () => {
+  for (const priceObservedAt of [undefined, '2026-10-02T14:48:33Z']) {
+    assert.deepEqual(await call('POST', '/guess', playerId, { direction: 'UP', priceObservedAt }), {
+      status: 400,
+      body: { error: 'INVALID_PRICE_OBSERVED_AT' },
+    });
+  }
+});
+
+await check('A priceObservedAt the server never recorded → 409 PRICE_EXPIRED', async () => {
+  assert.deepEqual(await call('POST', '/guess', playerId, { direction: 'UP', priceObservedAt: new Date().toISOString() }), {
+    status: 409,
+    body: { error: 'PRICE_EXPIRED' },
+  });
+});
+
+await check('A recorded price more than 3 s old → 409 PRICE_EXPIRED', async () => {
+  const { observedAt } = await priceOnScreen();
+  await sleep(3_500);
+  assert.deepEqual(await call('POST', '/guess', playerId, { direction: 'UP', priceObservedAt: observedAt }), {
+    status: 409,
+    body: { error: 'PRICE_EXPIRED' },
+  });
+});
+
+let guessSentAt = 0;
+await check('Guess naming the price on screen → 201, with exactly that price as the entry price', async () => {
+  const price = await priceOnScreen();
+  guessSentAt = Date.now();
+  const { status, body } = await call('POST', '/guess', playerId, { direction: 'UP', priceObservedAt: price.observedAt });
   assert.equal(status, 201);
   assert.equal(body.openGuess?.direction, 'UP');
+  // Compared as strings: the entry price is the very price the player saw (D4).
+  assert.equal(body.openGuess?.entryPrice, price.value);
 });
 
 await check('Second guess → 409 GUESS_OPEN', async () => {
-  assert.deepEqual(await call('POST', '/guess', playerId, { direction: 'DOWN' }), {
+  const { observedAt } = await priceOnScreen();
+  assert.deepEqual(await call('POST', '/guess', playerId, { direction: 'DOWN', priceObservedAt: observedAt }), {
     status: 409,
     body: { error: 'GUESS_OPEN' },
   });
 });
 
-console.log('  Waiting for the poller to resolve the guess, which takes over a minute…');
-await check('The guess resolves, and the score moves by lastResult.delta', async () => {
-  const giveUpAt = Date.now() + 3 * 60_000;
+console.log('  Waiting for the resolver to resolve the guess, which takes over a minute…');
+await check('The resolver resolves the guess within 100 s, and the score moves by lastResult.delta', async () => {
+  // GET /state's backup can't act before 2 minutes (D5), so only the resolver can resolve the guess in time.
+  const giveUpAt = guessSentAt + 100_000;
   let state;
   do {
     await sleep(2_000);
     state = (await call('GET', '/state', playerId)).body;
   } while (state.openGuess && Date.now() < giveUpAt);
-  assert.equal(state.openGuess, null, 'Still open after 3 minutes');
+  assert.equal(state.openGuess, null, 'Still open 100 s after the guess');
 
   const { delta, guessedAt, resolvedAt, entryPrice, resolvedPrice } = state.lastResult;
   assert.ok(delta === 1 || delta === -1);
   // The player started at 0.
   assert.equal(state.score, delta);
-  // Resolved at a tick at least 60 s after the guess, at a different price (D4).
+  // Resolved by a price fetched at least 60 s after the guess, at a different price (D4, D5).
   assert.ok(Date.parse(resolvedAt) - Date.parse(guessedAt) >= 60_000);
   assert.notEqual(Number(resolvedPrice), Number(entryPrice));
 });
