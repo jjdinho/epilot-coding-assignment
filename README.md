@@ -16,13 +16,11 @@ A web game: guess whether the BTC/USD price will be higher or lower in a minute.
 
 ## Architecture
 
-- **Frontend:** a static React page on S3 and CloudFront. It polls the API every second while its tab is visible.
-- **API:** API Gateway and one Lambda. It fetches the price from Coinbase's public ticker on request, at most once a second per instance.
-- **Guess:** takes the price the API holds when it arrives, which must be under 3 seconds old. The API sends an SQS message delayed by 60 seconds, then saves the guess in DynamoDB.
-- **Resolver:** a Lambda triggered by that message. It fetches the price and, if it has moved, scores the guess with a conditional write, so a duplicate message can't score it twice. If not, it resends the message with a 2-second delay.
-- **Chart:** the last minute of Coinbase's recent trades, through the API.
-- **No schedules:** nothing runs while nobody plays.
-- **Infra:** one CDK stack in `eu-north-1`.
+- **Frontend:** a static React page on S3 and CloudFront.
+- **API:** API Gateway and one Lambda. It fetches the price and the chart's history from Coinbase on request.
+- **Guess:** the API sends an SQS message delayed 60 seconds, then saves the guess in DynamoDB.
+- **Resolver:** a Lambda triggered by that message. It scores the guess once the price has moved.
+- **Infra:** one CDK stack, with no scheduled jobs.
 
 The decisions behind it, and the alternatives we rejected, are in [docs/design.md](docs/design.md).
 

@@ -304,18 +304,11 @@ Conventions the code follows:
 
 ## 9. What we didn't do
 
-Authentication, a mobile layout and a leaderboard are left for when the game finds its fit with players.
+These features were consciously left out. They aren't needed yet, but can be added if the game needs more resiliency, scalability or a better UX.
 
-### Authentication
-
-**Why not.** The brief doesn't ask for it, and fairness doesn't depend on it: the server picks both prices (D4) and holds each player's lock. Auth would add continuity across devices, cleared storage and private windows. The cost: every reviewer would have to sign up and confirm an email before seeing the game, and the flows, verification and a smoke-test user would take much of the half-day budget.
-
-**How it would fit.** A Cognito user pool, with API Gateway's JWT authorizer on the HTTP API. The API takes `playerId` from the token's `sub` claim instead of `X-Player-Id`. The data model, resolution, aliases and endpoints stay as they are. An anonymous player could keep their score and alias: on first sign-in the client sends its old ID once, and the server moves the player item and repoints the alias item in one transaction.
-
-### Smaller omissions
-
-- **Alias changes and moderation.** Aliases are fixed and not checked for offensive words. A script could reserve many. API Gateway throttling would slow that, but stopping it needs auth or a CAPTCHA.
-- **Dead-letter queue.** A message that keeps failing for a reason other than Coinbase, such as a DynamoDB error, is redelivered every 30 seconds until SQS's 4-day retention ends. A dead-letter queue would set it aside after a few attempts. Without one, the `GET /state` backup still resolves the guess (D5), and errors show in the resolver's logs.
-- **A shared price cache.** At scale, many API instances would each call Coinbase once a second, and every open guess at each check (D2, D5). A shared cache or a single fetcher would cut that to one call, and a concurrency cap on the resolver's event source would bound its share.
-- **A mobile layout.** The page is one column at most 448 pixels wide, so it fits a phone but isn't designed for one. Once a player scrolls through their results, the score, price and guess buttons are off-screen. A mobile layout would pin them to the bottom.
-- **A leaderboard.** Players see only their own score. A top-scores list could show aliases (D9), but ranking needs a secondary index sorted by score (§5), and a public list would make alias moderation matter more.
+- **Authentication.** Sign-in would keep a player's score across browsers, devices and cleared storage (D6). Fairness doesn't depend on it, since the server picks both prices (D4), and it would make every reviewer sign up before playing. It would fit as a Cognito user pool with API Gateway's JWT authorizer: the API takes the player ID from the token's `sub` claim instead of `X-Player-Id`, and the data model and endpoints stay as they are.
+- **Alias changes and moderation.** Aliases are fixed once chosen (D9) and aren't filtered for offensive words. A script could reserve many. API Gateway throttling would slow that, but stopping it needs authentication or a CAPTCHA.
+- **A dead-letter queue.** A resolver message that keeps failing for a reason other than Coinbase, such as a DynamoDB error, is redelivered every 30 seconds until SQS's 4-day retention ends. A dead-letter queue would set it aside after a few attempts. Meanwhile, the `GET /state` backup still resolves the guess (D5).
+- **A shared price cache, and a cap on the resolver's concurrency.** Each warm API instance calls Coinbase once a second, and the resolver once per open guess per check (D2, D5). A shared cache would cut the API's calls to one a second in total, and a concurrency cap on the resolver's event source would bound the rest.
+- **A mobile layout.** The page is one column at most 448 pixels wide, so it fits a phone but isn't designed for one. A mobile layout would pin the score, price and Up and Down buttons to the bottom of the screen, so they stay in reach while the player scrolls through results.
+- **A leaderboard.** It would rank players' aliases by score (D9). That needs a secondary index sorted by score (§5), and a public list would make alias moderation matter more.
