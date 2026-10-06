@@ -11,7 +11,7 @@ describe('isValidPlayerId', () => {
     ['uppercase', randomUUID().toUpperCase()],
     ['version 1', '6ba7b810-9dad-11d1-80b4-00c04fd430c8'],
     ['version 7', '01890a5d-ac96-774b-bcce-b302099a8057'],
-    ['the price key', 'PRICE#LATEST'],
+    ['a prefixed key', 'PRICE#LATEST'],
     ['an alias key', 'ALIAS#x'],
     ['a guessable ID', '1'],
     ['the empty string', ''],

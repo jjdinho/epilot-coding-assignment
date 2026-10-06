@@ -5,7 +5,7 @@ describe('buildState', () => {
   const player = { alias: 'Satoshi', score: 0 };
   const now = new Date('2026-10-02T14:48:40.000Z');
 
-  const price = { price: '86024.74', exchangeTime: '2026-10-02T14:48:36.901234Z', observedAt: '2026-10-02T14:48:37.000Z' };
+  const price = { value: '86024.74', observedAt: '2026-10-02T14:48:37.000Z' };
 
   it('shows the price and whether it is stale', () => {
     expect(buildState(player, price, now)).toEqual({

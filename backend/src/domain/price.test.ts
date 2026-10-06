@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isStale, isValidObservedAt, priceKey, shouldFetch } from './price';
+import { isStale, isValidPrice, shouldFetch } from './price';
 
 describe('isStale', () => {
   const observedAt = '2026-10-02T14:48:33.000Z';
@@ -13,21 +13,20 @@ describe('isStale', () => {
   });
 });
 
-describe('isValidObservedAt', () => {
-  it('accepts new Date().toISOString() output', () => {
-    expect(isValidObservedAt(new Date().toISOString())).toBe(true);
+describe('isValidPrice', () => {
+  it.each(['86096.25', '86096', '86096.25000000'])('accepts %s', (value) => {
+    expect(isValidPrice(value)).toBe(true);
   });
 
   it.each([
-    ['no milliseconds', '2026-10-02T14:48:33Z'],
-    ['an offset instead of Z', '2026-10-02T14:48:33.120+00:00'],
-    ['a day that does not exist', '2026-02-30T00:00:00.000Z'],
-    ['the old price key', 'PRICE#LATEST'],
     ['the empty string', ''],
-    ['a number', 1759416513120],
+    ['a word', 'abc'],
+    ['a negative', '-1'],
+    ['exponent notation', '1e5'],
+    ['a number', 86096.25],
     ['a missing value', undefined],
   ])('rejects %s', (_, value) => {
-    expect(isValidObservedAt(value)).toBe(false);
+    expect(isValidPrice(value)).toBe(false);
   });
 });
 
@@ -44,11 +43,5 @@ describe('shouldFetch', () => {
 
   it('fetches when the last attempt was exactly 1 s ago', () => {
     expect(shouldFetch('2026-10-02T14:48:39.000Z', now)).toBe(true);
-  });
-});
-
-describe('priceKey', () => {
-  it('is PRICE# plus the timestamp', () => {
-    expect(priceKey('2026-10-02T14:48:33.120Z')).toBe('PRICE#2026-10-02T14:48:33.120Z');
   });
 });
