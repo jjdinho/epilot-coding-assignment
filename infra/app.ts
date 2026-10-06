@@ -19,8 +19,6 @@ class BtcUpDownStack extends Stack {
 
     const table = new TableV2(this, 'Table', {
       partitionKey: { name: 'pk', type: AttributeType.STRING },
-      // Price items expire an hour after they're fetched (§5).
-      timeToLiveAttribute: 'expiresAt',
     });
 
     // One message per guess, delayed 60 s (D5). No dead-letter queue: a message that keeps failing is retried until

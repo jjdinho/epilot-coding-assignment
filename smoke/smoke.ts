@@ -30,20 +30,9 @@ const playerId = randomUUID();
 // Smoke aliases stay reserved for good, which is accepted (D9).
 const alias = `smoke_${randomBytes(4).toString('hex')}`;
 
-interface Price {
-  value: string;
-  observedAt: string;
-  stale: boolean;
-}
-
-// The price on the player's screen, which a guess names by its observedAt (D4).
-async function priceOnScreen(): Promise<Price> {
-  return (await call('GET', '/state', playerId)).body.price;
-}
-
 await check('Bad player ID → 400 INVALID_PLAYER_ID', async () => {
-  // A price item's key, which the check keeps clients from addressing (D6).
-  assert.deepEqual(await call('GET', '/state', 'PRICE#2026-10-02T14:48:33.120Z'), {
+  // An alias item's key, which the check keeps clients from addressing (D6).
+  assert.deepEqual(await call('GET', '/state', 'ALIAS#satoshi'), {
     status: 400,
     body: { error: 'INVALID_PLAYER_ID' },
   });
@@ -81,19 +70,16 @@ await check('Same ID again → 409 PLAYER_EXISTS', async () => {
   assert.deepEqual(await call('POST', '/player', playerId, { alias }), { status: 409, body: { error: 'PLAYER_EXISTS' } });
 });
 
-let firstPrice: Price;
 await check('GET /state → the alias, score 0, a fresh price on the first call', async () => {
   const { status, body } = await call('GET', '/state', playerId);
   assert.equal(status, 200);
   assert.equal(body.alias, alias);
   assert.equal(body.score, 0);
   assert.equal(body.price?.stale, false);
-  firstPrice = body.price;
 });
 
 await check('Guess from an unknown player ID → 404 PLAYER_NOT_FOUND', async () => {
-  // An unknown player can't get a price of its own, so it names the real player's, while it's still fresh.
-  assert.deepEqual(await call('POST', '/guess', randomUUID(), { direction: 'UP', priceObservedAt: firstPrice.observedAt }), {
+  assert.deepEqual(await call('POST', '/guess', randomUUID(), { direction: 'UP' }), {
     status: 404,
     body: { error: 'PLAYER_NOT_FOUND' },
   });
@@ -106,45 +92,19 @@ await check('Bad direction → 400 INVALID_DIRECTION', async () => {
   });
 });
 
-await check('Missing priceObservedAt, or one without milliseconds → 400 INVALID_PRICE_OBSERVED_AT', async () => {
-  for (const priceObservedAt of [undefined, '2026-10-02T14:48:33Z']) {
-    assert.deepEqual(await call('POST', '/guess', playerId, { direction: 'UP', priceObservedAt }), {
-      status: 400,
-      body: { error: 'INVALID_PRICE_OBSERVED_AT' },
-    });
-  }
-});
-
-await check('A priceObservedAt the server never recorded → 409 PRICE_EXPIRED', async () => {
-  assert.deepEqual(await call('POST', '/guess', playerId, { direction: 'UP', priceObservedAt: new Date().toISOString() }), {
-    status: 409,
-    body: { error: 'PRICE_EXPIRED' },
-  });
-});
-
-await check('A recorded price more than 3 s old → 409 PRICE_EXPIRED', async () => {
-  const { observedAt } = await priceOnScreen();
-  await sleep(3_500);
-  assert.deepEqual(await call('POST', '/guess', playerId, { direction: 'UP', priceObservedAt: observedAt }), {
-    status: 409,
-    body: { error: 'PRICE_EXPIRED' },
-  });
-});
-
 let guessSentAt = 0;
-await check('Guess naming the price on screen → 201, with exactly that price as the entry price', async () => {
-  const price = await priceOnScreen();
+await check('Guess → 201, with the entry price as the price in the response', async () => {
   guessSentAt = Date.now();
-  const { status, body } = await call('POST', '/guess', playerId, { direction: 'UP', priceObservedAt: price.observedAt });
+  const { status, body } = await call('POST', '/guess', playerId, { direction: 'UP' });
   assert.equal(status, 201);
   assert.equal(body.openGuess?.direction, 'UP');
-  // Compared as strings: the entry price is the very price the player saw (D4).
-  assert.equal(body.openGuess?.entryPrice, price.value);
+  // Compared as strings: the page shows exactly the price the guess was made at (D4).
+  assert.equal(body.openGuess?.entryPrice, body.price?.value);
+  assert.equal(body.price?.stale, false);
 });
 
 await check('Second guess → 409 GUESS_OPEN', async () => {
-  const { observedAt } = await priceOnScreen();
-  assert.deepEqual(await call('POST', '/guess', playerId, { direction: 'DOWN', priceObservedAt: observedAt }), {
+  assert.deepEqual(await call('POST', '/guess', playerId, { direction: 'DOWN' }), {
     status: 409,
     body: { error: 'GUESS_OPEN' },
   });
@@ -165,7 +125,7 @@ await check('The resolver resolves the guess within 100 s, and the score moves b
   assert.ok(delta === 1 || delta === -1);
   // The player started at 0.
   assert.equal(state.score, delta);
-  // Resolved by a price fetched at least 60 s after the guess, at a different price (D4, D5).
+  // Resolved by a price fetched at least 60 s after the guess, at a different price (D5).
   assert.ok(Date.parse(resolvedAt) - Date.parse(guessedAt) >= 60_000);
   assert.notEqual(Number(resolvedPrice), Number(entryPrice));
 });

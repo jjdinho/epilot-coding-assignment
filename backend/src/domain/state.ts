@@ -11,10 +11,9 @@ export interface Player {
   lastResult?: LastResult;
 }
 
-// A price the API fetched and recorded (D2, §5).
-export interface PriceItem {
-  price: string;
-  exchangeTime: string;
+// A price the API fetched, and when (D2).
+export interface Price {
+  value: string;
   observedAt: string;
 }
 
@@ -27,12 +26,10 @@ export interface State {
 }
 
 // The response of GET /state, POST /player and POST /guess (§6).
-export function buildState(player: Player, priceItem: PriceItem | undefined, now: Date): State {
+export function buildState(player: Player, price: Price | undefined, now: Date): State {
   const { guessDirection: direction, guessEntryPrice: entryPrice, guessedAt } = player;
   return {
-    price: priceItem
-      ? { value: priceItem.price, observedAt: priceItem.observedAt, stale: isStale(priceItem.observedAt, now) }
-      : null,
+    price: price ? { ...price, stale: isStale(price.observedAt, now) } : null,
     alias: player.alias,
     score: player.score,
     openGuess: direction && entryPrice && guessedAt ? { direction, entryPrice, guessedAt } : null,

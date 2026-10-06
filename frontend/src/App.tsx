@@ -23,7 +23,7 @@ const TRENDS: Record<number, { Icon: LucideIcon; className: string }> = {
 
 const GUESS_ERRORS: Record<string, string> = {
   GUESS_OPEN: 'You already have a guess open.',
-  PRICE_EXPIRED: 'That price has expired. Try again.',
+  PRICE_STALE: 'The price feed is unavailable. Try again.',
 };
 
 export function App() {
@@ -244,11 +244,7 @@ function GuessButtons({ state: { price, openGuess }, onGuessed }: { state: State
     setPending(true);
     setMessage('');
     try {
-      // Names the price on screen, sent back exactly as the server sent it (D4).
-      const res = await request('/guess', {
-        method: 'POST',
-        body: JSON.stringify({ direction, priceObservedAt: price?.observedAt }),
-      });
+      const res = await request('/guess', { method: 'POST', body: JSON.stringify({ direction }) });
       const body = await res.json();
       if (res.status === 201) return onGuessed(body);
       // The next poll shows the real state, so the message only needs to stay briefly.

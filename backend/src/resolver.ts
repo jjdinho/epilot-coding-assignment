@@ -1,7 +1,7 @@
 import type { SQSEvent } from 'aws-lambda';
 import { scoreGuess } from './domain/guess';
+import { fetchTicker } from './coinbase';
 import { resolveGuess, sendResolveMessage, type ResolveMessage } from './guesses';
-import { fetchTicker } from './ticker';
 
 // Check again soon when the price hasn't moved, so the guess resolves soon after it does (D5).
 const RECHECK_DELAY_S = 2;
@@ -17,7 +17,7 @@ export async function handler(event: SQSEvent): Promise<void> {
 async function resolve(message: ResolveMessage): Promise<void> {
   let price: string;
   try {
-    ({ price } = await fetchTicker());
+    price = await fetchTicker();
   } catch (err) {
     console.error('Ticker failed', err);
     return sendResolveMessage(message, RETRY_DELAY_S);
