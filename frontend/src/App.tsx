@@ -3,13 +3,15 @@ import { Fragment, useEffect, useRef, useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { AliasForm } from './AliasForm';
 import { request, type Direction, type LastResult, type PricePoint, type State } from './api';
 import { addPoint, change } from './chart';
 import { secondsLeft } from './countdown';
 import { clock, usd } from './format';
+import { HowToPlay } from './HowToPlay';
 import { PriceChart } from './PriceChart';
-import { RESULTS_SHOWN, storeResult } from './results';
+import { storeResult } from './results';
 
 const signedUsd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', signDisplay: 'exceptZero' });
 const percent = new Intl.NumberFormat('en-US', { style: 'percent', minimumFractionDigits: 3, signDisplay: 'exceptZero' });
@@ -94,6 +96,10 @@ export function App() {
       <h1 className="scroll-m-20 text-4xl font-extrabold tracking-tight text-balance">BTC Up/Down</h1>
       {needsAlias ? (
         <>
+          <section className="text-muted-foreground">
+            <h2 className="mb-1 font-semibold text-foreground">How to play</h2>
+            <HowToPlay />
+          </section>
           <AliasForm onJoined={() => setNeedsAlias(false)} />
           <PriceChart points={points} />
         </>
@@ -120,10 +126,25 @@ function Game({
   const { alias, score, price, openGuess } = state;
   return (
     <>
-      <p className="text-muted-foreground">
-        Playing as <strong className="text-foreground">{alias}</strong> · Score{' '}
-        <strong className="text-foreground">{score}</strong>
-      </p>
+      <div className="flex items-baseline justify-between gap-4">
+        <p className="text-muted-foreground">
+          Playing as <strong className="text-foreground">{alias}</strong>
+        </p>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button variant="link" className="h-auto p-0 text-base font-normal text-muted-foreground underline">
+              How to play
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" align="end">
+            <HowToPlay />
+          </TooltipContent>
+        </Tooltip>
+      </div>
+      <div>
+        <p className="text-sm text-muted-foreground">Your score</p>
+        <p className="text-5xl font-extrabold tracking-tight">{score}</p>
+      </div>
       <PriceCard price={price} points={points} />
       <PriceChart points={points} />
       <GuessButtons state={state} onGuessed={onGuessed} />
@@ -167,21 +188,20 @@ function Trend({ amount, fraction }: { amount: number; fraction: number }) {
   );
 }
 
-// Newest first: the open guess, replaced by its result once a poll shows it resolved, then earlier results.
+// The open guess under the buttons, then the results set apart below, newest first. Once a poll shows the open guess
+// resolved, its result tops the list.
 function Guesses({ openGuess, results }: { openGuess: State['openGuess']; results: LastResult[] }) {
-  // The open guess counts towards the cards shown, so it pushes the oldest result off.
-  const shown = openGuess ? results.slice(0, RESULTS_SHOWN - 1) : results;
-  const count = shown.length + (openGuess ? 1 : 0);
-  if (!count) return null;
   return (
     <>
       {openGuess && <OpenGuess {...openGuess} />}
-      {shown.map((result) => (
+      {results.length > 0 && (
+        <p className="mt-4 text-sm text-muted-foreground">
+          Last {results.length} {results.length === 1 ? 'guess' : 'guesses'}
+        </p>
+      )}
+      {results.map((result) => (
         <GuessResult key={result.guessedAt} {...result} />
       ))}
-      <p className="text-sm text-muted-foreground">
-        Showing last {count} {count === 1 ? 'guess' : 'guesses'}
-      </p>
     </>
   );
 }
@@ -255,17 +275,27 @@ function GuessButtons({ state: { price, openGuess }, onGuessed }: { state: State
     }
   }
 
+  // Green for up, red for down. While a guess is open, the guessed one keeps its colour, muted like any disabled
+  // button, and the other turns grey.
+  function colour(direction: Direction) {
+    if (openGuess && openGuess.direction !== direction) return 'bg-muted text-muted-foreground';
+    return direction === 'UP' ? 'bg-green-600 hover:bg-green-700' : 'bg-red-600 hover:bg-red-700';
+  }
+
   return (
     <>
-      <div className="grid grid-cols-2 gap-2">
-        <Button size="lg" disabled={disabled} onClick={() => guess('UP')}>
-          {openGuess?.direction === 'UP' ? <Check data-icon="inline-start" /> : <ArrowUp data-icon="inline-start" />}
-          Up
-        </Button>
-        <Button size="lg" disabled={disabled} onClick={() => guess('DOWN')}>
-          {openGuess?.direction === 'DOWN' ? <Check data-icon="inline-start" /> : <ArrowDown data-icon="inline-start" />}
-          Down
-        </Button>
+      <div className="grid gap-2">
+        <p className="text-lg font-semibold">Will BTC go up or down in the next minute?</p>
+        <div className="grid grid-cols-2 gap-2">
+          <Button size="lg" className={colour('UP')} disabled={disabled} onClick={() => guess('UP')}>
+            {openGuess?.direction === 'UP' ? <Check data-icon="inline-start" /> : <ArrowUp data-icon="inline-start" />}
+            Up
+          </Button>
+          <Button size="lg" className={colour('DOWN')} disabled={disabled} onClick={() => guess('DOWN')}>
+            {openGuess?.direction === 'DOWN' ? <Check data-icon="inline-start" /> : <ArrowDown data-icon="inline-start" />}
+            Down
+          </Button>
+        </div>
       </div>
       {message && (
         <p role="alert" className="text-sm text-destructive">

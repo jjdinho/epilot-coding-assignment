@@ -25,10 +25,8 @@ export function AliasForm({ onJoined }: { onJoined: () => void }) {
   return (
     <form onSubmit={submit} className="grid gap-2">
       <Label htmlFor="alias">Choose an alias</Label>
-      <div className="flex gap-2">
-        <Input id="alias" value={alias} onChange={(e) => setAlias(e.target.value)} autoFocus />
-        <Button type="submit">Play</Button>
-      </div>
+      <Input id="alias" placeholder="my-alias" value={alias} onChange={(e) => setAlias(e.target.value)} autoFocus />
+      <Button type="submit">Play</Button>
       {message && (
         <p role="alert" className="text-sm text-destructive">
           {message}
