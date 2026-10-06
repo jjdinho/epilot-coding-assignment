@@ -16,7 +16,13 @@ async function call(method: string, path: string, playerId: string, body?: unkno
 }
 
 async function check(name: string, run: () => Promise<void>) {
-  await run();
+  try {
+    await run();
+  } catch (err) {
+    // Names the failing check, which the assertion's stack trace doesn't.
+    console.log(`✗ ${name}`);
+    throw err;
+  }
   console.log(`✓ ${name}`);
 }
 
