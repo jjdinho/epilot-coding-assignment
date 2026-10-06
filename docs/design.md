@@ -336,6 +336,8 @@ Conventions the code follows:
 
 ## 10. What we didn't do
 
+Authentication, a mobile layout and a leaderboard are left for later. Each would earn its place once the game found its fit with players.
+
 ### Authentication
 
 **Why not.** The brief doesn't ask for it, and the game's fairness doesn't depend on it. The server picks both the entry and the resolution price (D4), and holds the lock for each player, so a signed-in player couldn't do anything an anonymous one can't. What auth would add is continuity: the same player on another device, after clearing storage, or in a private window, with their alias intact. The cost is that every reviewer would have to sign up and confirm an email before seeing the game. Building the sign-up and sign-in flows, email verification, and a test user for the smoke test would also take a large share of the half-day budget.
@@ -347,3 +349,5 @@ Conventions the code follows:
 - **Alias changes and moderation.** Aliases are fixed once chosen and not checked for offensive words. Without sign-up, a script could also reserve many aliases. API Gateway throttling would slow that down, but stopping it outright needs auth or a CAPTCHA.
 - **Dead-letter queue.** A message that keeps failing for a reason other than Coinbase, such as a DynamoDB error, is delivered again every 30 seconds until SQS's retention period ends after 4 days. A dead-letter queue would set it aside for inspection after a few attempts. Without one, the `GET /state` backup still resolves the guess when the player returns (D5). Errors show in the resolver's logs either way.
 - **A shared price cache.** Each API instance caches its own price (D2). At real scale, many instances would each call Coinbase once a second, and many open guesses would each fetch at every check (D5). A shared cache, or one fetcher writing for everyone, would keep that to one call, and a concurrency cap on the resolver's event source would bound the resolver's share. Not needed at this traffic.
+- **A mobile layout.** The page is one column at most 448 pixels wide, so it fits a phone, but it isn't laid out with one in mind. The guess controls would gain most. Once a player scrolls down through their results, the score, the price and the Up and Down buttons are off the top of the screen. A mobile layout would pin them to the bottom of the screen instead.
+- **A leaderboard, or any sign of other players.** Each player sees only their own score and guesses. Aliases already exist to be shown in place of the player ID (D9), so a top-scores list could use them. The table has no secondary index (§5), so ranking players would need one sorted by score. A public list would also make the missing alias moderation matter more.
