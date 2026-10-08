@@ -2,7 +2,9 @@
 
 A web game: guess whether the BTC/USD price will be higher or lower in a minute.
 
-**Play it at https://d2xt4659279tip.cloudfront.net**
+**Play it at https://d2xt4659279tip.cloudfront.net [NOW OFFLINE]**
+
+The project is done, so it has been taken offline. It can be spun back up on request.
 
 <img src="docs/screenshot.png" alt="The game: score, live BTC/USD price and chart, an open guess counting down, and the last two results" width="360">
 
@@ -81,7 +83,7 @@ Runs against a deployed API:
 API_URL=<ApiUrl> npm run smoke
 ```
 
-Against the live stack, that's `API_URL=https://d4zs1odcjl.execute-api.eu-north-1.amazonaws.com npm run smoke`.
+Against the live stack, when it's up, that's `API_URL=https://d4zs1odcjl.execute-api.eu-north-1.amazonaws.com npm run smoke`.
 
 It plays one new player through the API: the player ID and alias checks, the chart's history, a fresh price, and the guesses the API must refuse. Last, it makes a guess and waits for the resolver to score it, so a run takes a little over a minute. It prints a ✓ per check and stops at the first failure with a ✗ and the assertion. Each run reserves an alias of the form `smoke_xxxxxxxx` for good, as any player does.
 
